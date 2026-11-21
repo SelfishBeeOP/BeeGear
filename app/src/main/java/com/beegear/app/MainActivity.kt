@@ -1,4 +1,4 @@
-package com.beegear.app
+Package com.beegear.app
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
