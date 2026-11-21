@@ -1,42 +1,57 @@
 package com.beegear.app
 
-import android.net.Uri
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.MediaItem
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.Image
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
-import java.net.URI
+import java.net.URL
+
+data class Category(val name: String, val url: String)
+
+data class Movie(
+    val name: String,
+    val url: String,
+    val image: String?,
+    val category: String
+)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             MaterialTheme {
-                BeeGearApp()
+                BeeGearHome()
             }
         }
     }
 }
-
-private data class Category(val name: String, val url: String)
-private data class Entry(val name: String, val url: String, val folder: Boolean)
 
 private val categories = listOf(
     Category("English Movies", "http://172.16.50.7/DHAKA-FLIX-7/English%20Movies/"),
@@ -44,252 +59,352 @@ private val categories = listOf(
     Category("IMDb Top 250", "http://172.16.50.14/DHAKA-FLIX-14/IMDb%20Top-250%20Movies/"),
     Category("Hindi Movies", "http://172.16.50.14/DHAKA-FLIX-14/Hindi%20Movies/"),
     Category("South Indian Hindi Dubbed", "http://172.16.50.14/DHAKA-FLIX-14/SOUTH%20INDIAN%20MOVIES/Hindi%20Dubbed/"),
-    Category("TV and Web Series", "http://172.16.50.12/DHAKA-FLIX-12/TV-WEB-Series/"),
-    Category("Anime and Cartoon", "http://172.16.50.10/DHAKA-FLIX-10/Anime%20%26%20Cartoon%20TV%20Series/"),
-    Category("Korean TV and Web Series", "http://172.16.50.14/DHAKA-FLIX-14/KOREAN%20TV%20%26%20WEB%20Series/"),
+    Category("TV & Web Series", "http://172.16.50.12/DHAKA-FLIX-12/TV-WEB-Series/"),
+    Category("Anime & Cartoon", "http://172.16.50.10/DHAKA-FLIX-10/Anime%20%26%20Cartoon%20TV%20Series/"),
+    Category("Korean TV & Web Series", "http://172.16.50.14/DHAKA-FLIX-14/KOREAN%20TV%20%26%20WEB%20Series/"),
     Category("Animation Movies", "http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies/")
 )
 
-private val videoTypes = listOf(
-    ".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".ts"
-)
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun BeeGearApp() {
-    var url by remember { mutableStateOf<String?>(null) }
-    var title by remember { mutableStateOf("BeeGear") }
-    var entries by remember { mutableStateOf<List<Entry>>(emptyList()) }
-    var history by remember { mutableStateOf(listOf<Pair<String, String>>()) }
-    var loading by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var video by remember { mutableStateOf<String?>(null) }
-    var videoTitle by remember { mutableStateOf("") }
-
-    BackHandler(enabled = video != null || url != null) {
-        if (video != null) {
-            video = null
-        } else if (history.isNotEmpty()) {
-            val previous = history.last()
-            history = history.dropLast(1)
-            url = previous.first
-            title = previous.second
-        } else {
-            url = null
-            title = "BeeGear"
-        }
-    }
-
-    if (video != null) {
-        VideoScreen(video!!, videoTitle)
-        return
-    }
-
-    LaunchedEffect(url) {
-        val target = url ?: return@LaunchedEffect
-        loading = true
-        error = null
-
+private suspend fun loadMovies(category: Category): List<Movie> {
+    return withContext(Dispatchers.IO) {
         try {
-            entries = withContext(Dispatchers.IO) {
-                loadEntries(target)
-            }
-        } catch (e: Exception) {
-            error = "তালিকা আনা যায়নি। ISP নেটওয়ার্ক পরীক্ষা করো।"
-            entries = emptyList()
-        }
+            val document = Jsoup.connect(category.url)
+                .userAgent("Mozilla/5.0")
+                .timeout(20000)
+                .get()
 
+            document.select("a[href]").mapNotNull { link ->
+                val address = link.absUrl("href")
+                val fileName = link.text().trim()
+                    .ifBlank { link.selectFirst("img")?.attr("alt") ?: "" }
+
+                val isVideo = address.substringBefore("?")
+                    .lowercase()
+                    .let {
+                        listOf(".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".ts")
+                            .any { ext -> it.endsWith(ext) }
+                    }
+
+                if (isVideo && address.isNotBlank()) {
+                    val imageElement = link.selectFirst("img")
+                    val imageUrl = imageElement?.let {
+                        it.absUrl("src").ifBlank { it.absUrl("data-src") }
+                    }?.takeIf { it.isNotBlank() }
+
+                    Movie(
+                        name = fileName.ifBlank {
+                            address.substringAfterLast("/").substringBeforeLast(".")
+                        },
+                        url = address,
+                        image = imageUrl,
+                        category = category.name
+                    )
+                } else null
+            }.distinctBy { it.url }.take(40)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+}
+
+@Composable
+fun BeeGearHome() {
+    var movieRows by remember { mutableStateOf<Map<String, List<Movie>>>(emptyMap()) }
+    var loading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        loading = true
+        val result = mutableMapOf<String, List<Movie>>()
+        categories.forEach { category ->
+            result[category.name] = loadMovies(category)
+        }
+        movieRows = result
         loading = false
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                },
-                navigationIcon = {
-                    if (url != null) {
-                        TextButton(onClick = {
-                            if (history.isNotEmpty()) {
-                                val previous = history.last()
-                                history = history.dropLast(1)
-                                url = previous.first
-                                title = previous.second
-                            } else {
-                                url = null
-                                title = "BeeGear"
-                            }
-                        }) {
-                            Text("Back")
-                        }
+    val allMovies = movieRows.values.flatten()
+    val featured = allMovies.firstOrNull()
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.linearGradient(
+                    colors = listOf(
+                        Color(0xFF050713),
+                        Color(0xFF10152D),
+                        Color(0xFF080817),
+                        Color(0xFF160D2B)
+                    )
+                )
+            )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(
+                            Color(0x553A63FF),
+                            Color.Transparent
+                        ),
+                        radius = 850f
+                    )
+                )
+                .verticalScroll(rememberScrollState())
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 22.dp, vertical = 20.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "BEE",
+                    color = Color.White,
+                    fontSize = 27.sp,
+                    fontWeight = FontWeight.Black
+                )
+                Text(
+                    text = "GEAR",
+                    color = Color(0xFF53C8FF),
+                    fontSize = 27.sp,
+                    fontWeight = FontWeight.Black
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "HOME",
+                    color = Color(0xFF9BDFFF),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            if (loading) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(280.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = Color(0xFF55C8FF))
+                        Spacer(Modifier.height(14.dp))
+                        Text(
+                            "Connecting to your ISP server...",
+                            color = Color.LightGray,
+                            fontSize = 13.sp
+                        )
                     }
                 }
+            } else if (featured != null) {
+                FeaturedSection(featured)
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(28.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(Color(0x55333B60))
+                        .padding(22.dp)
+                ) {
+                    Text(
+                        "No videos found. Connect to your ISP network and try again.",
+                        color = Color.White
+                    )
+                }
+            }
+
+            if (!loading) {
+                categories.forEach { category ->
+                    val movies = movieRows[category.name].orEmpty()
+                    if (movies.isNotEmpty()) {
+                        MovieRow(category.name, movies)
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(40.dp))
+        }
+    }
+}
+
+@Composable
+fun FeaturedSection(movie: Movie) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .height(270.dp)
+            .clip(RoundedCornerShape(25.dp))
+            .background(
+                Brush.linearGradient(
+                    listOf(
+                        Color(0xFF263A70),
+                        Color(0xFF17172F),
+                        Color(0xFF44245D)
+                    )
+                )
+            )
+            .border(
+                1.dp,
+                Color(0x6659CFFF),
+                RoundedCornerShape(25.dp)
+            )
+    ) {
+        if (movie.image != null) {
+            PosterImage(
+                url = movie.image,
+                modifier = Modifier.fillMaxSize()
             )
         }
-    ) { padding ->
-        Column(
-            Modifier
+
+        Box(
+            modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (url == null) {
-                Text(
-                    "DhakaFlix BDIX Library",
-                    style = MaterialTheme.typography.titleMedium
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color.Transparent,
+                            Color(0xDD080A18)
+                        )
+                    )
                 )
+        )
 
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(categories) { category ->
-                        Button(
-                            onClick = {
-                                history = emptyList()
-                                title = category.name
-                                url = category.url
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(category.name)
-                        }
-                    }
-                }
-            } else {
-                if (loading) {
-                    CircularProgressIndicator(
-                        Modifier.align(Alignment.CenterHorizontally)
-                    )
-                    Text("সার্ভার থেকে তালিকা আনা হচ্ছে...")
-                }
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(22.dp)
+        ) {
+            Text(
+                "FEATURED",
+                color = Color(0xFF67D5FF),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                movie.name,
+                color = Color.White,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 2
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                movie.category,
+                color = Color.LightGray,
+                fontSize = 13.sp
+            )
+        }
+    }
+}
 
-                error?.let {
-                    Text(
-                        it,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
+@Composable
+fun MovieRow(title: String, movies: List<Movie>) {
+    Column(modifier = Modifier.padding(top = 20.dp)) {
+        Text(
+            text = title,
+            color = Color.White,
+            fontSize = 19.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(start = 18.dp, bottom = 12.dp)
+        )
 
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    items(entries) { entry ->
-                        Button(
-                            onClick = {
-                                if (entry.folder) {
-                                    history = history + ((url ?: "") to title)
-                                    title = entry.name
-                                    url = entry.url
-                                } else {
-                                    videoTitle = entry.name
-                                    video = entry.url
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                (if (entry.folder) "📁 " else "▶ ") + entry.name,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 14.dp)
+        ) {
+            movies.forEach { movie ->
+                MovieCard(movie)
             }
         }
     }
 }
 
-private fun loadEntries(address: String): List<Entry> {
-    val connection = URI(address).toURL().openConnection()
-    connection.connectTimeout = 12000
-    connection.readTimeout = 20000
-    connection.setRequestProperty("User-Agent", "BeeGear Android")
-
-    val html = connection.getInputStream()
-        .bufferedReader()
-        .use { it.readText() }
-
-    val doc = Jsoup.parse(html, address)
-
-    return doc.select("a[href]").mapNotNull { link ->
-        val href = link.attr("href").trim()
-        val name = link.text().trim()
-
-        if (
-            href.isBlank() ||
-            name.isBlank() ||
-            href == "../" ||
-            name == ".." ||
-            name.equals("Parent Directory", true)
+@Composable
+fun MovieCard(movie: Movie) {
+    Column(
+        modifier = Modifier
+            .width(145.dp)
+            .padding(horizontal = 5.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0x55333D64))
+            .border(
+                1.dp,
+                Color(0x5557BFFF),
+                RoundedCornerShape(16.dp)
+            )
+            .focusable()
+            .clickable { }
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(190.dp)
+                .background(
+                    Brush.linearGradient(
+                        listOf(
+                            Color(0xFF253B72),
+                            Color(0xFF17172D),
+                            Color(0xFF45255B)
+                        )
+                    )
+                ),
+            contentAlignment = Alignment.Center
         ) {
-            return@mapNotNull null
+            if (movie.image != null) {
+                PosterImage(
+                    url = movie.image,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Text(
+                    "BEE\nGEAR",
+                    color = Color(0xFF7CCFFF),
+                    fontWeight = FontWeight.Black,
+                    fontSize = 19.sp
+                )
+            }
         }
 
-        val resolved = URI(address).resolve(href).toString()
-        val folder = href.endsWith("/")
-        val cleanUrl = resolved.substringBefore("?")
-
-        val isVideo = videoTypes.any {
-            cleanUrl.lowercase().endsWith(it)
-        }
-
-        if (!folder && !isVideo) {
-            return@mapNotNull null
-        }
-
-        Entry(name.removeSuffix("/"), resolved, folder)
-    }
-        .distinctBy { it.url }
-        .sortedWith(
-            compareByDescending<Entry> { it.folder }
-                .thenBy { it.name.lowercase() }
+        Text(
+            text = movie.name,
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 2,
+            modifier = Modifier.padding(9.dp)
         )
+    }
 }
 
 @Composable
-private fun VideoScreen(address: String, name: String) {
-    val context = LocalContext.current
-
-    val exoPlayer = remember(address) {
-        ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(Uri.parse(address)))
-            prepare()
-            playWhenReady = true
-        }
-    }
-
-    DisposableEffect(exoPlayer) {
-        onDispose {
-            exoPlayer.release()
-        }
-    }
-
-    Column(
-        Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(
-            name,
-            Modifier.padding(12.dp),
-            maxLines = 2
-        )
-
-        AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = exoPlayer
-                    useController = true
+fun PosterImage(url: String, modifier: Modifier = Modifier) {
+    val bitmap by produceState<Bitmap?>(initialValue = null, url) {
+        value = withContext(Dispatchers.IO) {
+            try {
+                URL(url).openConnection().apply {
+                    connectTimeout = 10000
+                    readTimeout = 10000
+                }.getInputStream().use {
+                    BitmapFactory.decodeStream(it)
                 }
-            },
-            update = {
-                it.player = exoPlayer
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap!!.asImageBitmap(),
+            contentDescription = null,
+            modifier = modifier,
+            contentScale = ContentScale.Crop
         )
     }
 }
