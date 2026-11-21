@@ -1,19 +1,21 @@
+
 package com.beegear.app
 
-import androidx.compose.foundation.verticalScroll
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
+import android.net.Uri
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -25,113 +27,303 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.Image
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import java.net.URL
+import java.net.URLDecoder
 
-data class Category(val name: String, val url: String)
+data class Category(
+    val name: String,
+    val url: String
+)
 
-data class Movie(
+data class MediaEntry(
     val name: String,
     val url: String,
-    val image: String?,
-    val category: String
+    val isFolder: Boolean,
+    val isVideo: Boolean,
+    val isImage: Boolean
 )
+
+data class FolderLocation(
+    val title: String,
+    val url: String
+)
+
+private val categories = listOf(
+    Category(
+        "English Movies",
+        "http://172.16.50.7/DHAKA-FLIX-7/English%20Movies/"
+    ),
+    Category(
+        "English Movies 1080p",
+        "http://172.16.50.14/DHAKA-FLIX-14/English%20Movies%20%281080p%29/"
+    ),
+    Category(
+        "IMDb Top 250",
+        "http://172.16.50.14/DHAKA-FLIX-14/IMDb%20Top-250%20Movies/"
+    ),
+    Category(
+        "Hindi Movies",
+        "http://172.16.50.14/DHAKA-FLIX-14/Hindi%20Movies/"
+    ),
+    Category(
+        "South Indian Hindi Dubbed",
+        "http://172.16.50.14/DHAKA-FLIX-14/SOUTH%20INDIAN%20MOVIES/Hindi%20Dubbed/"
+    ),
+    Category(
+        "TV & Web Series",
+        "http://172.16.50.12/DHAKA-FLIX-12/TV-WEB-Series/"
+    ),
+    Category(
+        "Anime & Cartoon",
+        "http://172.16.50.10/DHAKA-FLIX-10/Anime%20%26%20Cartoon%20TV%20Series/"
+    ),
+    Category(
+        "Korean TV & Web Series",
+        "http://172.16.50.14/DHAKA-FLIX-14/KOREAN%20TV%20%26%20WEB%20Series/"
+    ),
+    Category(
+        "Animation Movies",
+        "http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies/"
+    )
+)
+
+private val videoExtensions = listOf(
+    ".mp4", ".mkv", ".avi", ".mov",
+    ".webm", ".m4v", ".ts"
+)
+
+private val imageExtensions = listOf(
+    ".jpg", ".jpeg", ".png", ".webp", ".bmp"
+)
+
+// SERVER FOLDER SCANNER
+private suspend fun scanFolder(url: String): Result<List<MediaEntry>> {
+    return withContext(Dispatchers.IO) {
+        try {
+            val document = Jsoup.connect(url)
+                .userAgent("Mozilla/5.0")
+                .timeout(25000)
+                .ignoreContentType(true)
+                .get()
+
+            val baseHost = URL(url).host
+
+            val entries = document.select("a[href]")
+                .mapNotNull { link ->
+
+                    val rawHref = link.attr("href").trim()
+
+                    if (
+                        rawHref.isBlank() ||
+                        rawHref.startsWith("#") ||
+                        rawHref.startsWith("?") ||
+                        rawHref == "../" ||
+                        rawHref == "./" ||
+                        rawHref.startsWith("javascript:")
+                    ) {
+                        return@mapNotNull null
+                    }
+
+                    val address = link.absUrl("href")
+
+                    if (address.isBlank()) {
+                        return@mapNotNull null
+                    }
+
+                    val parsedUrl = try {
+                        URL(address)
+                    } catch (e: Exception) {
+                        return@mapNotNull null
+                    }
+
+                    if (parsedUrl.host != baseHost) {
+                        return@mapNotNull null
+                    }
+
+                    val path = parsedUrl.path.lowercase()
+
+                    val isVideo = videoExtensions.any {
+                        path.endsWith(it)
+                    }
+
+                    val isImage = imageExtensions.any {
+                        path.endsWith(it)
+                    }
+
+                    val isFolder =
+                        !isVideo &&
+                        !isImage &&
+                        (
+                            rawHref.endsWith("/") ||
+                            parsedUrl.path.endsWith("/")
+                        )
+
+                    if (!isFolder && !isVideo && !isImage) {
+                        return@mapNotNull null
+                    }
+
+                    val fileName = link.text().trim()
+                        .ifBlank {
+                            try {
+                                URLDecoder.decode(
+                                    parsedUrl.path
+                                        .trimEnd('/')
+                                        .substringAfterLast("/"),
+                                    "UTF-8"
+                                )
+                            } catch (e: Exception) {
+                                parsedUrl.path
+                                    .trimEnd('/')
+                                    .substringAfterLast("/")
+                            }
+                        }
+
+                    MediaEntry(
+                        name = fileName,
+                        url = address,
+                        isFolder = isFolder,
+                        isVideo = isVideo,
+                        isImage = isImage
+                    )
+                }
+                .distinctBy { it.url }
+                .sortedWith(
+                    compareByDescending<MediaEntry> { it.isFolder }
+                        .thenBy { it.name.lowercase() }
+                )
+
+            Result.success(entries)
+
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         setContent {
             MaterialTheme {
-                BeeGearHome()
+                BeeGearApp()
             }
         }
     }
 }
 
-private val categories = listOf(
-    Category("English Movies", "http://172.16.50.7/DHAKA-FLIX-7/English%20Movies/"),
-    Category("English Movies 1080p", "http://172.16.50.14/DHAKA-FLIX-14/English%20Movies%20%281080p%29/"),
-    Category("IMDb Top 250", "http://172.16.50.14/DHAKA-FLIX-14/IMDb%20Top-250%20Movies/"),
-    Category("Hindi Movies", "http://172.16.50.14/DHAKA-FLIX-14/Hindi%20Movies/"),
-    Category("South Indian Hindi Dubbed", "http://172.16.50.14/DHAKA-FLIX-14/SOUTH%20INDIAN%20MOVIES/Hindi%20Dubbed/"),
-    Category("TV & Web Series", "http://172.16.50.12/DHAKA-FLIX-12/TV-WEB-Series/"),
-    Category("Anime & Cartoon", "http://172.16.50.10/DHAKA-FLIX-10/Anime%20%26%20Cartoon%20TV%20Series/"),
-    Category("Korean TV & Web Series", "http://172.16.50.14/DHAKA-FLIX-14/KOREAN%20TV%20%26%20WEB%20Series/"),
-    Category("Animation Movies", "http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies/")
-)
-
-private suspend fun loadMovies(category: Category): List<Movie> {
-    return withContext(Dispatchers.IO) {
-        try {
-            val document = Jsoup.connect(category.url)
-                .userAgent("Mozilla/5.0")
-                .timeout(20000)
-                .get()
-
-            document.select("a[href]").mapNotNull { link ->
-                val address = link.absUrl("href")
-                val fileName = link.text().trim()
-                    .ifBlank { link.selectFirst("img")?.attr("alt") ?: "" }
-
-                val isVideo = address.substringBefore("?")
-                    .lowercase()
-                    .let {
-                        listOf(".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".ts")
-                            .any { ext -> it.endsWith(ext) }
-                    }
-
-                if (isVideo && address.isNotBlank()) {
-                    val imageElement = link.selectFirst("img")
-                    val imageUrl = imageElement?.let {
-                        it.absUrl("src").ifBlank { it.absUrl("data-src") }
-                    }?.takeIf { it.isNotBlank() }
-
-                    Movie(
-                        name = fileName.ifBlank {
-                            address.substringAfterLast("/").substringBeforeLast(".")
-                        },
-                        url = address,
-                        image = imageUrl,
-                        category = category.name
-                    )
-                } else null
-            }.distinctBy { it.url }.take(40)
-        } catch (e: Exception) {
-            emptyList()
-        }
-    }
-}
-
 @Composable
-fun BeeGearHome() {
-    var movieRows by remember { mutableStateOf<Map<String, List<Movie>>>(emptyMap()) }
-    var loading by remember { mutableStateOf(true) }
+fun BeeGearApp() {
 
-    LaunchedEffect(Unit) {
-        loading = true
-        val result = mutableMapOf<String, List<Movie>>()
-        categories.forEach { category ->
-            result[category.name] = loadMovies(category)
-        }
-        movieRows = result
-        loading = false
+    var selectedCategory by remember {
+        mutableStateOf<Category?>(null)
     }
 
-    val allMovies = movieRows.values.flatten()
-    val featured = allMovies.firstOrNull()
+    var currentTitle by remember {
+        mutableStateOf("BEEGEAR")
+    }
+
+    var currentUrl by remember {
+        mutableStateOf("")
+    }
+
+    var folderStack by remember {
+        mutableStateOf(listOf<FolderLocation>())
+    }
+
+    var entries by remember {
+        mutableStateOf<List<MediaEntry>>(emptyList())
+    }
+
+    var loading by remember {
+        mutableStateOf(false)
+    }
+
+    var errorMessage by remember {
+        mutableStateOf("")
+    }
+
+    var playingUrl by remember {
+        mutableStateOf<String?>(null)
+    }
+
+    var playingTitle by remember {
+        mutableStateOf("")
+    }
+
+    fun goBack() {
+        if (playingUrl != null) {
+            playingUrl = null
+            return
+        }
+
+        if (folderStack.isNotEmpty()) {
+            val newStack = folderStack.dropLast(1)
+            folderStack = newStack
+
+            if (newStack.isNotEmpty()) {
+                val previous = newStack.last()
+                currentTitle = previous.title
+                currentUrl = previous.url
+            } else {
+                val category = selectedCategory
+                if (category != null) {
+                    currentTitle = category.name
+                    currentUrl = category.url
+                }
+            }
+        } else {
+            selectedCategory = null
+            currentTitle = "BEEGEAR"
+            currentUrl = ""
+            entries = emptyList()
+        }
+    }
+
+    BackHandler(
+        enabled = playingUrl != null ||
+            selectedCategory != null
+    ) {
+        goBack()
+    }
+
+    LaunchedEffect(currentUrl) {
+        if (currentUrl.isNotBlank()) {
+            loading = true
+            errorMessage = ""
+            entries = emptyList()
+
+            val result = scanFolder(currentUrl)
+
+            if (result.isSuccess) {
+                entries = result.getOrDefault(emptyList())
+            } else {
+                errorMessage = result.exceptionOrNull()
+                    ?.localizedMessage
+                    ?: "Unable to read server folder."
+            }
+
+            loading = false
+        }
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(
                 Brush.linearGradient(
-                    colors = listOf(
+                    listOf(
                         Color(0xFF050713),
                         Color(0xFF10152D),
                         Color(0xFF080817),
@@ -140,257 +332,391 @@ fun BeeGearHome() {
                 )
             )
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(
-                            Color(0x553A63FF),
-                            Color.Transparent
-                        ),
-                        radius = 850f
-                    )
-                )
-                .verticalScroll(rememberScrollState())
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 22.dp, vertical = 20.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "BEE",
-                    color = Color.White,
-                    fontSize = 27.sp,
-                    fontWeight = FontWeight.Black
-                )
-                Text(
-                    text = "GEAR",
-                    color = Color(0xFF53C8FF),
-                    fontSize = 27.sp,
-                    fontWeight = FontWeight.Black
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    text = "HOME",
-                    color = Color(0xFF9BDFFF),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
 
-            if (loading) {
-                Box(
+        if (playingUrl != null) {
+
+            VideoPlayerScreen(
+                url = playingUrl!!,
+                title = playingTitle,
+                onBack = { playingUrl = null }
+            )
+
+        } else {
+
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(
+                        rememberScrollState()
+                    )
+                    .padding(16.dp)
+            ) {
+
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(280.dp),
-                    contentAlignment = Alignment.Center
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(color = Color(0xFF55C8FF))
-                        Spacer(Modifier.height(14.dp))
-                        Text(
-                            "Connecting to your ISP server...",
-                            color = Color.LightGray,
-                            fontSize = 13.sp
+
+                    Text(
+                        text = "BEE",
+                        color = Color.White,
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Black
+                    )
+
+                    Text(
+                        text = "GEAR",
+                        color = Color(0xFF53C8FF),
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Black
+                    )
+
+                    Spacer(Modifier.weight(1f))
+
+                    Text(
+                        text = "ISP STREAMING",
+                        color = Color(0xFF75CFFF),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                if (selectedCategory == null) {
+
+                    Text(
+                        "Explore Categories",
+                        color = Color.White,
+                        fontSize = 21.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(
+                            top = 20.dp,
+                            bottom = 16.dp
+                        )
+                    )
+
+                    categories.forEach { category ->
+
+                        CategoryCard(
+                            name = category.name,
+                            onClick = {
+                                selectedCategory = category
+                                currentTitle = category.name
+                                currentUrl = category.url
+                                folderStack = emptyList()
+                            }
                         )
                     }
-                }
-            } else if (featured != null) {
-                FeaturedSection(featured)
-            } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(28.dp)
-                        .clip(RoundedCornerShape(22.dp))
-                        .background(Color(0x55333B60))
-                        .padding(22.dp)
-                ) {
-                    Text(
-                        "No videos found. Connect to your ISP network and try again.",
-                        color = Color.White
-                    )
-                }
-            }
 
-            if (!loading) {
-                categories.forEach { category ->
-                    val movies = movieRows[category.name].orEmpty()
-                    if (movies.isNotEmpty()) {
-                        MovieRow(category.name, movies)
+                } else {
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(
+                                top = 12.dp,
+                                bottom = 20.dp
+                            ),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+
+                        Text(
+                            "‹",
+                            color = Color(0xFF59CFFF),
+                            fontSize = 34.sp,
+                            modifier = Modifier
+                                .clickable { goBack() }
+                                .padding(end = 12.dp)
+                        )
+
+                        Column {
+                            Text(
+                                currentTitle,
+                                color = Color.White,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            Text(
+                                selectedCategory?.name ?: "",
+                                color = Color.LightGray,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+
+                    if (loading) {
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(250.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment =
+                                    Alignment.CenterHorizontally
+                            ) {
+                                CircularProgressIndicator(
+                                    color = Color(0xFF55C8FF)
+                                )
+
+                                Spacer(Modifier.height(14.dp))
+
+                                Text(
+                                    "Reading ISP server...",
+                                    color = Color.LightGray
+                                )
+                            }
+                        }
+
+                    } else if (errorMessage.isNotBlank()) {
+
+                        Text(
+                            "Server error:\n$errorMessage",
+                            color = Color(0xFFFF8B8B),
+                            modifier = Modifier.padding(16.dp)
+                        )
+
+                    } else {
+
+                        val poster = entries.firstOrNull {
+                            it.isImage
+                        }
+
+                        if (poster != null) {
+                            PosterImage(
+                                url = poster.url,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(230.dp)
+                                    .clip(
+                                        RoundedCornerShape(18.dp)
+                                    )
+                            )
+
+                            Spacer(Modifier.height(18.dp))
+                        }
+
+                        val folders = entries.filter {
+                            it.isFolder
+                        }
+
+                        val videos = entries.filter {
+                            it.isVideo
+                        }
+
+                        if (folders.isNotEmpty()) {
+
+                            Text(
+                                "FOLDERS",
+                                color = Color(0xFF62CAFF),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(
+                                    top = 10.dp,
+                                    bottom = 10.dp
+                                )
+                            )
+
+                            folders.forEach { folder ->
+
+                                FolderCard(
+                                    name = folder.name,
+                                    onClick = {
+
+                                        folderStack =
+                                            folderStack + FolderLocation(
+                                                currentTitle,
+                                                currentUrl
+                                            )
+
+                                        currentTitle = folder.name
+                                        currentUrl = folder.url
+                                    }
+                                )
+                            }
+                        }
+
+                        if (videos.isNotEmpty()) {
+
+                            Text(
+                                "VIDEOS / EPISODES",
+                                color = Color(0xFF62CAFF),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(
+                                    top = 22.dp,
+                                    bottom = 10.dp
+                                )
+                            )
+
+                            videos.forEach { video ->
+
+                                VideoCard(
+                                    name = video.name,
+                                    onClick = {
+                                        playingTitle = video.name
+                                        playingUrl = video.url
+                                    }
+                                )
+                            }
+                        }
+
+                        if (
+                            folders.isEmpty() &&
+                            videos.isEmpty()
+                        ) {
+                            Text(
+                                "এই ফোল্ডারে কোনো ফোল্ডার বা ভিডিও পাওয়া যায়নি।",
+                                color = Color.LightGray,
+                                modifier = Modifier.padding(20.dp)
+                            )
+                        }
                     }
                 }
-            }
 
-            Spacer(Modifier.height(40.dp))
+                Spacer(Modifier.height(40.dp))
+            }
         }
     }
 }
 
 @Composable
-fun FeaturedSection(movie: Movie) {
-    Box(
+fun CategoryCard(
+    name: String,
+    onClick: () -> Unit
+) {
+
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .height(270.dp)
-            .clip(RoundedCornerShape(25.dp))
-            .background(
-                Brush.linearGradient(
-                    listOf(
-                        Color(0xFF263A70),
-                        Color(0xFF17172F),
-                        Color(0xFF44245D)
-                    )
-                )
-            )
-            .border(
-                1.dp,
-                Color(0x6659CFFF),
-                RoundedCornerShape(25.dp)
-            )
-    ) {
-        if (movie.image != null) {
-            PosterImage(
-                url = movie.image,
-                modifier = Modifier.fillMaxSize()
-            )
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            Color.Transparent,
-                            Color(0xDD080A18)
-                        )
-                    )
-                )
-        )
-
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(22.dp)
-        ) {
-            Text(
-                "FEATURED",
-                color = Color(0xFF67D5FF),
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                movie.name,
-                color = Color.White,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 2
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                movie.category,
-                color = Color.LightGray,
-                fontSize = 13.sp
-            )
-        }
-    }
-}
-
-@Composable
-fun MovieRow(title: String, movies: List<Movie>) {
-    Column(modifier = Modifier.padding(top = 20.dp)) {
-        Text(
-            text = title,
-            color = Color.White,
-            fontSize = 19.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(start = 18.dp, bottom = 12.dp)
-        )
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 14.dp)
-        ) {
-            movies.forEach { movie ->
-                MovieCard(movie)
-            }
-        }
-    }
-}
-
-@Composable
-fun MovieCard(movie: Movie) {
-    Column(
-        modifier = Modifier
-            .width(145.dp)
-            .padding(horizontal = 5.dp)
-            .clip(RoundedCornerShape(16.dp))
+            .padding(vertical = 6.dp)
+            .clip(RoundedCornerShape(15.dp))
             .background(Color(0x55333D64))
-            .border(
-                1.dp,
-                Color(0x5557BFFF),
-                RoundedCornerShape(16.dp)
-            )
+            .clickable { onClick() }
             .focusable()
-            .clickable { }
+            .padding(18.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(190.dp)
-                .background(
-                    Brush.linearGradient(
-                        listOf(
-                            Color(0xFF253B72),
-                            Color(0xFF17172D),
-                            Color(0xFF45255B)
-                        )
-                    )
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            if (movie.image != null) {
-                PosterImage(
-                    url = movie.image,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                Text(
-                    "BEE\nGEAR",
-                    color = Color(0xFF7CCFFF),
-                    fontWeight = FontWeight.Black,
-                    fontSize = 19.sp
-                )
-            }
-        }
 
         Text(
-            text = movie.name,
+            "▣",
+            color = Color(0xFF59CFFF),
+            fontSize = 23.sp
+        )
+
+        Spacer(Modifier.width(14.dp))
+
+        Text(
+            name,
             color = Color.White,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 2,
-            modifier = Modifier.padding(9.dp)
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+
+        Spacer(Modifier.weight(1f))
+
+        Text(
+            "›",
+            color = Color(0xFF59CFFF),
+            fontSize = 25.sp
         )
     }
 }
 
 @Composable
-fun PosterImage(url: String, modifier: Modifier = Modifier) {
-    val bitmap by produceState<Bitmap?>(initialValue = null, url) {
+fun FolderCard(
+    name: String,
+    onClick: () -> Unit
+) {
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 5.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0x55333D64))
+            .clickable { onClick() }
+            .focusable()
+            .padding(15.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+
+        Text(
+            "📁",
+            fontSize = 22.sp
+        )
+
+        Spacer(Modifier.width(14.dp))
+
+        Text(
+            name,
+            color = Color.White,
+            fontSize = 14.sp,
+            modifier = Modifier.weight(1f)
+        )
+
+        Text(
+            "›",
+            color = Color(0xFF59CFFF),
+            fontSize = 23.sp
+        )
+    }
+}
+
+@Composable
+fun VideoCard(
+    name: String,
+    onClick: () -> Unit
+) {
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 5.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0x55333D64))
+            .clickable { onClick() }
+            .focusable()
+            .padding(15.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+
+        Text(
+            "▶",
+            color = Color(0xFF59CFFF),
+            fontSize = 21.sp
+        )
+
+        Spacer(Modifier.width(14.dp))
+
+        Text(
+            name,
+            color = Color.White,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+@Composable
+fun PosterImage(
+    url: String,
+    modifier: Modifier = Modifier
+) {
+
+    val bitmap by produceState<Bitmap?>(
+        initialValue = null,
+        key1 = url
+    ) {
+
         value = withContext(Dispatchers.IO) {
             try {
                 URL(url).openConnection().apply {
                     connectTimeout = 10000
-                    readTimeout = 10000
+                    readTimeout = 15000
                 }.getInputStream().use {
                     BitmapFactory.decodeStream(it)
                 }
@@ -401,11 +727,91 @@ fun PosterImage(url: String, modifier: Modifier = Modifier) {
     }
 
     if (bitmap != null) {
+
         Image(
             bitmap = bitmap!!.asImageBitmap(),
             contentDescription = null,
             modifier = modifier,
-            contentScale = ContentScale.Crop
+            contentScale = ContentScale.Fit
+        )
+    } else {
+
+        Box(
+            modifier = modifier
+                .background(Color(0xFF202844)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "BEEGEAR",
+                color = Color(0xFF59CFFF),
+                fontWeight = FontWeight.Black
+            )
+        }
+    }
+}
+
+@Composable
+fun VideoPlayerScreen(
+    url: String,
+    title: String,
+    onBack: () -> Unit
+) {
+
+    val context = LocalContext.current
+
+    val player = remember(url) {
+        ExoPlayer.Builder(context)
+            .build()
+            .apply {
+                setMediaItem(MediaItem.fromUri(Uri.parse(url)))
+                prepare()
+                playWhenReady = true
+            }
+    }
+
+    DisposableEffect(player) {
+        onDispose {
+            player.release()
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+
+        Text(
+            "‹  BACK",
+            color = Color.White,
+            fontSize = 16.sp,
+            modifier = Modifier
+                .clickable { onBack() }
+                .focusable()
+                .padding(16.dp)
+        )
+
+        Text(
+            title,
+            color = Color.White,
+            fontSize = 15.sp,
+            modifier = Modifier.padding(
+                horizontal = 16.dp,
+                vertical = 8.dp
+            )
+        )
+
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    this.player = player
+                    useController = true
+                    keepScreenOn = true
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
         )
     }
 }
