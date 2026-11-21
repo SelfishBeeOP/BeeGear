@@ -1,5 +1,6 @@
-Package com.beegear.app
+package com.beegear.app
 
+import androidx.compose.foundation.verticalScroll
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
