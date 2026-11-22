@@ -5,7 +5,6 @@ import android.content.pm.ActivityInfo
 import android.view.View
 import android.media.AudioManager
 import android.view.MotionEvent
-import android.media.AudioManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -38,6 +37,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.TravelExplore
+import androidx.compose.material.icons.filled.Explore
+import androidx.compose.material.icons.filled.Whatshot
+import androidx.compose.material.icons.filled.CollectionsBookmark
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.TextButton
@@ -48,8 +53,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.ui.geometry.Offset
@@ -1276,11 +1279,11 @@ private fun FloatingBottomNav(tab: String, onSelect: (String) -> Unit, modifier:
                 ) {
                     androidx.compose.material3.Icon(
                         imageVector = when (item.second) {
-                            "clapperboard" -> androidx.compose.material.icons.Icons.Outlined.Movie
-                            "radar" -> androidx.compose.material.icons.Icons.Outlined.TravelExplore
-                            "orbit" -> androidx.compose.material.icons.Icons.Outlined.Explore
-                            "flame" -> androidx.compose.material.icons.Icons.Outlined.Whatshot
-                            else -> androidx.compose.material.icons.Icons.Outlined.CollectionsBookmark
+                            "clapperboard" -> Icons.Filled.Movie
+                            "radar" -> Icons.Filled.TravelExplore
+                            "orbit" -> Icons.Filled.Explore
+                            "flame" -> Icons.Filled.Whatshot
+                            else -> Icons.Filled.CollectionsBookmark
                         },
                         contentDescription = item.first,
                         tint = iconColor.copy(alpha = if (selected) 1f else .82f),
