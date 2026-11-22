@@ -80,6 +80,24 @@ data class FolderLocation(val title: String, val url: String, val poster: String
 data class Recommendation(val title: String, val url: String, val poster: String?, val subtitle: String)
 data class SearchHit(val title: String, val url: String, val poster: String?, val subtitle: String, val isVideo: Boolean)
 
+private fun readRecommendationList(raw: String?): List<Recommendation> {
+    if (raw.isNullOrBlank()) return emptyList()
+    return try {
+        val array = JSONArray(raw)
+        (0 until array.length()).mapNotNull { index ->
+            val item = array.optJSONObject(index) ?: return@mapNotNull null
+            Recommendation(
+                item.optString("title"),
+                item.optString("url"),
+                item.optString("poster").ifBlank { null },
+                item.optString("subtitle")
+            )
+        }
+    } catch (_: Exception) {
+        emptyList()
+    }
+}
+
 private val categories = listOf(
     Category("English Movies", "http://172.16.50.7/DHAKA-FLIX-7/English%20Movies/"),
     Category("English Movies 1080p", "http://172.16.50.14/DHAKA-FLIX-14/English%20Movies%20%281080p%29/"),
@@ -313,30 +331,20 @@ fun BeeGearApp() {
     var recommendations by remember { mutableStateOf(emptyList<Recommendation>()) }
     var recommendationsLoading by remember { mutableStateOf(true) }
     var favorites by remember {
-        mutableStateOf(run {
-            val raw = appContext.getSharedPreferences("beegear_settings", android.content.Context.MODE_PRIVATE)
-                .getString("saved_items", "[]") ?: "[]"
-            try {
-                val array = JSONArray(raw)
-                (0 until array.length()).mapNotNull { i ->
-                    val o = array.optJSONObject(i) ?: return@mapNotNull null
-                    Recommendation(o.optString("title"), o.optString("url"), o.optString("poster").ifBlank { null }, o.optString("subtitle"))
-                }
-            } catch (_: Exception) { emptyList() }
-        })
+        mutableStateOf<List<Recommendation>>(
+            readRecommendationList(
+                appContext.getSharedPreferences("beegear_settings", android.content.Context.MODE_PRIVATE)
+                    .getString("saved_items", "[]")
+            )
+        )
     }
     var recentlyWatched by remember {
-        mutableStateOf(run {
-            val raw = appContext.getSharedPreferences("beegear_settings", android.content.Context.MODE_PRIVATE)
-                .getString("recent_items", "[]") ?: "[]"
-            try {
-                val array = JSONArray(raw)
-                (0 until array.length()).mapNotNull { i ->
-                    val o = array.optJSONObject(i) ?: return@mapNotNull null
-                    Recommendation(o.optString("title"), o.optString("url"), o.optString("poster").ifBlank { null }, o.optString("subtitle"))
-                }
-            } catch (_: Exception) { emptyList() }
-        })
+        mutableStateOf<List<Recommendation>>(
+            readRecommendationList(
+                appContext.getSharedPreferences("beegear_settings", android.content.Context.MODE_PRIVATE)
+                    .getString("recent_items", "[]")
+            )
+        )
     }
 
     LaunchedEffect(recentlyWatched) {
