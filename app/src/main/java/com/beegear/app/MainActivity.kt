@@ -3,6 +3,9 @@ package com.beegear.app
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.view.View
+import android.media.AudioManager
+import android.view.MotionEvent
+import android.media.AudioManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -45,6 +48,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -1233,27 +1241,51 @@ private fun TrendingOrSavedScreen(
 @Composable
 private fun FloatingBottomNav(tab: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
     val navItems = listOf(
-        Triple("HOME", "⌂", "Home"),
-        Triple("SEARCH", "⌕", "Search"),
-        Triple("BROWSE", "◎", "Explore"),
-        Triple("TRENDING", "▤", "Trending"),
-        Triple("FAVORITES", "▣", "My List")
+        "HOME" to "clapperboard",
+        "SEARCH" to "radar",
+        "BROWSE" to "orbit",
+        "TRENDING" to "flame",
+        "FAVORITES" to "layers-3"
     )
     val selectedIndex = navItems.indexOfFirst { it.first == tab }.coerceAtLeast(0)
-    BoxWithConstraints(modifier.fillMaxWidth().height(68.dp).clip(RoundedCornerShape(34.dp))
-        .background(Color.White.copy(alpha = if (appDarkMode) .10f else .34f))
-        .border(1.dp, Color.White.copy(alpha = .32f), RoundedCornerShape(34.dp))) {
+    val iconColor = if (appDarkMode) Color.White else Color(0xFF171717)
+    BoxWithConstraints(
+        modifier.fillMaxWidth().height(76.dp).clip(RoundedCornerShape(40.dp))
+            .background(if (appDarkMode) Color(0xCC182333) else Color(0xCCF5F8FC))
+            .border(1.dp, Color.White.copy(alpha = if (appDarkMode) .38f else .78f), RoundedCornerShape(40.dp))
+    ) {
         val itemWidth = maxWidth / navItems.size
-        val indicatorX by animateDpAsState(targetValue = itemWidth * selectedIndex + (itemWidth - 42.dp) / 2, animationSpec = tween(420), label = "liquidGlassPosition")
-        Box(Modifier.offset(x = indicatorX, y = 8.dp).size(42.dp).clip(CircleShape)
-            .background(Brush.linearGradient(listOf(Color.White.copy(alpha = .34f), Color.White.copy(alpha = .10f), Color(0xFF8DA8FF).copy(alpha = .18f))))
-            .border(1.dp, Color.White.copy(alpha = .58f), CircleShape))
-        Row(Modifier.fillMaxSize().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            navItems.forEach { (key, icon, label) ->
-                val selected = tab == key
-                Column(Modifier.weight(1f).fillMaxHeight().clickable { onSelect(key) }, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    Text(icon, color = if (selected) primaryText else textMuted, fontSize = 23.sp, fontWeight = FontWeight.Bold)
-                    Text(label, color = if (selected) primaryText else textMuted, fontSize = 9.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
+        val pillWidth = itemWidth * 0.90f
+        val indicatorX by animateDpAsState(
+            targetValue = itemWidth * selectedIndex + (itemWidth - pillWidth) / 2,
+            animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.78f, stiffness = 420f),
+            label = "liquidGlassPosition"
+        )
+        Box(
+            Modifier.offset(x = indicatorX, y = 5.dp).width(pillWidth).height(66.dp)
+                .clip(RoundedCornerShape(36.dp))
+                .background(Brush.linearGradient(if (appDarkMode) listOf(Color.White.copy(.27f), Color.White.copy(.10f), Color(0xFF9CB9E8).copy(.16f)) else listOf(Color.White.copy(.94f), Color.White.copy(.56f), Color(0xFFD9E8F8).copy(.48f))))
+                .border(1.dp, Color.White.copy(alpha = .78f), RoundedCornerShape(36.dp))
+        )
+        Row(Modifier.fillMaxSize().padding(horizontal = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+            navItems.forEachIndexed { index, item ->
+                val selected = index == selectedIndex
+                Box(
+                    Modifier.weight(1f).fillMaxHeight().clickable { onSelect(item.first) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    androidx.compose.material3.Icon(
+                        imageVector = when (item.second) {
+                            "clapperboard" -> androidx.compose.material.icons.Icons.Outlined.Movie
+                            "radar" -> androidx.compose.material.icons.Icons.Outlined.TravelExplore
+                            "orbit" -> androidx.compose.material.icons.Icons.Outlined.Explore
+                            "flame" -> androidx.compose.material.icons.Icons.Outlined.Whatshot
+                            else -> androidx.compose.material.icons.Icons.Outlined.CollectionsBookmark
+                        },
+                        contentDescription = item.first,
+                        tint = iconColor.copy(alpha = if (selected) 1f else .82f),
+                        modifier = Modifier.size(if (selected) 34.dp else 31.dp)
+                    )
                 }
             }
         }
@@ -1303,6 +1335,40 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
             prepare()
             playWhenReady = true
         }
+    }
+    val audioManager = remember { context.getSystemService(android.content.Context.AUDIO_SERVICE) as AudioManager }
+    val gestureModifier = Modifier.pointerInput(player, fullscreen) {
+        var accumulatedY = 0f
+        detectDragGestures(
+            onDragStart = { accumulatedY = 0f },
+            onDrag = { change, dragAmount ->
+                change.consume()
+                accumulatedY += dragAmount.y
+                if (kotlin.math.abs(accumulatedY) >= 22f) {
+                    val increase = accumulatedY < 0f
+                    val isLeftHalf = change.position.x < size.width / 2f
+                    if (isLeftHalf) {
+                        val activity = context as? Activity
+                        val window = activity?.window
+                        if (window != null) {
+                            val attrs = window.attributes
+                            val current = if (attrs.screenBrightness < 0f) 0.5f else attrs.screenBrightness
+                            attrs.screenBrightness = (current + if (increase) 0.06f else -0.06f).coerceIn(0.02f, 1f)
+                            window.attributes = attrs
+                        }
+                    } else {
+                        val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                        val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                        audioManager.setStreamVolume(
+                            AudioManager.STREAM_MUSIC,
+                            (currentVolume + if (increase) 1 else -1).coerceIn(0, maxVolume),
+                            0
+                        )
+                    }
+                    accumulatedY = 0f
+                }
+            }
+        )
     }
 
     // Automatically attach matching .srt/.vtt/.ass/.ssa files found beside the video.
@@ -1471,7 +1537,7 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
                         }
                     },
                     update = { it.player = player },
-                    modifier = Modifier.weight(1f).fillMaxWidth()
+                    modifier = Modifier.weight(1f).fillMaxWidth().then(gestureModifier)
                 )
             }
         } else {
@@ -1484,7 +1550,7 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
                     }
                 },
                 update = { it.player = player },
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize().then(gestureModifier)
             )
             Row(
                 Modifier.align(Alignment.TopEnd).padding(14.dp),
