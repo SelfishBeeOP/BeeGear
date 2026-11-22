@@ -7,6 +7,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -20,7 +22,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -42,7 +46,10 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
@@ -145,6 +152,56 @@ private suspend fun loadRecommendations(): List<Recommendation> {
     }
     return output.distinctBy { it.url }
 }
+
+
+private val subtitleExtensions = listOf(".srt", ".vtt", ".ass", ".ssa")
+
+private fun subtitleMimeType(uriOrName: String): String? {
+    val path = uriOrName.substringBefore("?").lowercase()
+    return when {
+        path.endsWith(".srt") -> MimeTypes.APPLICATION_SUBRIP
+        path.endsWith(".vtt") -> MimeTypes.TEXT_VTT
+        path.endsWith(".ass") || path.endsWith(".ssa") -> MimeTypes.TEXT_SSA
+        else -> null
+    }
+}
+
+/**
+ * Looks for subtitle files beside the video on the ISP directory listing.
+ * Only files with a supported subtitle extension are returned.
+ */
+private suspend fun findSameFolderSubtitles(videoUrl: String): List<MediaItem.SubtitleConfiguration> =
+    withContext(Dispatchers.IO) {
+        try {
+            val video = URL(videoUrl)
+            val parentUrl = videoUrl.substringBeforeLast("/") + "/"
+            val videoBase = video.path.substringAfterLast("/").substringBeforeLast(".")
+                .lowercase().replace(Regex("[._-]+"), " ").trim()
+            val doc = Jsoup.connect(parentUrl).userAgent("Mozilla/5.0")
+                .timeout(15000).ignoreContentType(true).get()
+            doc.select("a[href]").mapNotNull { link ->
+                val address = link.absUrl("href")
+                if (address.isBlank()) return@mapNotNull null
+                val parsed = try { URL(address) } catch (_: Exception) { return@mapNotNull null }
+                if (parsed.host != video.host) return@mapNotNull null
+                val name = parsed.path.substringAfterLast("/")
+                val mime = subtitleMimeType(name) ?: return@mapNotNull null
+                val subtitleBase = name.substringBeforeLast(".")
+                    .lowercase().replace(Regex("[._-]+"), " ").trim()
+                // Prefer subtitles whose filename resembles the video filename.
+                val similarity = subtitleBase == videoBase ||
+                    videoBase.startsWith(subtitleBase) || subtitleBase.startsWith(videoBase)
+                if (!similarity) return@mapNotNull null
+                MediaItem.SubtitleConfiguration.Builder(Uri.parse(address))
+                    .setMimeType(mime)
+                    .setLanguage("und")
+                    .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                    .build()
+            }.distinctBy { it.uri.toString() }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1107,6 +1164,13 @@ private fun NetworkPoster(url: String, modifier: Modifier = Modifier) {
 @Composable
 private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
     val context = LocalContext.current
+    var playerError by remember(url) { mutableStateOf("") }
+    var subtitleDialog by remember { mutableStateOf(false) }
+    var embeddedSubtitleTracks by remember { mutableStateOf(emptyList<Pair<String, Pair<androidx.media3.common.TrackGroup, Int>>>()) }
+    var externalSubtitleName by remember { mutableStateOf("") }
+    var autoSubtitleCount by remember { mutableIntStateOf(0) }
+    var autoSubtitleConfigs by remember { mutableStateOf(emptyList<MediaItem.SubtitleConfiguration>()) }
+
     val player = remember(url) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(Uri.parse(url)))
@@ -1114,12 +1178,126 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
             playWhenReady = true
         }
     }
+
+    // Automatically attach matching .srt/.vtt/.ass/.ssa files found beside the video.
+    LaunchedEffect(player, url) {
+        val subtitles = findSameFolderSubtitles(url)
+        if (subtitles.isNotEmpty()) {
+            val position = player.currentPosition
+            val wasPlaying = player.playWhenReady
+            val item = MediaItem.Builder()
+                .setUri(Uri.parse(url))
+                .setSubtitleConfigurations(subtitles)
+                .build()
+            player.setMediaItem(item, position)
+            player.prepare()
+            player.playWhenReady = wasPlaying
+            autoSubtitleConfigs = subtitles
+            autoSubtitleCount = subtitles.size
+        }
+    }
+
     DisposableEffect(player) { onDispose { player.release() } }
+
+    val externalSubtitlePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) { }
+            val mime = subtitleMimeType(uri.lastPathSegment ?: uri.toString())
+                ?: when (context.contentResolver.getType(uri)) {
+                    "text/vtt" -> MimeTypes.TEXT_VTT
+                    "application/x-subrip", "application/srt" -> MimeTypes.APPLICATION_SUBRIP
+                    else -> null
+                }
+            if (mime == null) {
+                playerError = "এই subtitle format সমর্থিত নয়। .srt অথবা .vtt ফাইল নির্বাচন করুন।"
+            } else {
+                val position = player.currentPosition
+                val wasPlaying = player.playWhenReady
+                val currentItem = MediaItem.Builder()
+                    .setUri(Uri.parse(url))
+                    .setSubtitleConfigurations(
+                        buildList {
+                            // Keep automatically discovered subtitles when adding an external file.
+                            addAll(autoSubtitleConfigs)
+                            add(
+                                MediaItem.SubtitleConfiguration.Builder(uri)
+                                    .setMimeType(mime)
+                                    .setLanguage("und")
+                                    .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                                    .build()
+                            )
+                        }
+                    )
+                    .build()
+                player.setMediaItem(currentItem, position)
+                player.prepare()
+                player.playWhenReady = wasPlaying
+                externalSubtitleName = uri.lastPathSegment ?: "External subtitle"
+                playerError = ""
+            }
+        }
+    }
+
+    fun refreshSubtitleTracks() {
+        val tracks = mutableListOf<Pair<String, Pair<androidx.media3.common.TrackGroup, Int>>>()
+        player.currentTracks.groups.forEach { group ->
+            if (group.type == C.TRACK_TYPE_TEXT) {
+                for (index in 0 until group.length) {
+                    if (group.isTrackSupported(index)) {
+                        val format = group.getTrackFormat(index)
+                        val label = format.label
+                            ?: format.language
+                            ?: "Subtitle ${tracks.size + 1}"
+                        tracks.add(label to (group.mediaTrackGroup to index))
+                    }
+                }
+            }
+        }
+        embeddedSubtitleTracks = tracks
+    }
+
+    LaunchedEffect(player) {
+        while (true) {
+            refreshSubtitleTracks()
+            kotlinx.coroutines.delay(700)
+        }
+    }
+
     Column(Modifier.fillMaxSize().background(Color.Black)) {
-        Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text("‹", color = Color.White, fontSize = 30.sp, modifier = Modifier.clickable { onBack() })
             Spacer(Modifier.width(12.dp))
-            Text(title, color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                title,
+                color = Color.White,
+                fontSize = 14.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                "CC",
+                color = Color.White,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color.White.copy(alpha = 0.14f))
+                    .clickable {
+                        refreshSubtitleTracks()
+                        subtitleDialog = true
+                    }
+                    .padding(horizontal = 13.dp, vertical = 9.dp)
+            )
         }
         AndroidView(
             factory = { ctx ->
@@ -1131,6 +1309,97 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
             },
             update = { it.player = player },
             modifier = Modifier.fillMaxWidth().weight(1f)
+        )
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                when {
+                    externalSubtitleName.isNotBlank() -> "External: $externalSubtitleName"
+                    autoSubtitleCount > 0 -> "$autoSubtitleCount same-folder subtitle(s) found"
+                    else -> "Subtitles: choose CC"
+                },
+                color = Color.LightGray,
+                fontSize = 11.sp,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                "Open subtitle",
+                color = Color.White,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(accentRed)
+                    .clickable {
+                        externalSubtitlePicker.launch(
+                            arrayOf("application/x-subrip", "text/vtt", "text/*", "*/*")
+                        )
+                    }
+                    .padding(horizontal = 12.dp, vertical = 9.dp)
+            )
+        }
+        if (playerError.isNotBlank()) {
+            Text(playerError, color = Color(0xFFFF8A80), fontSize = 12.sp, modifier = Modifier.padding(12.dp))
+        }
+    }
+
+    if (subtitleDialog) {
+        AlertDialog(
+            onDismissRequest = { subtitleDialog = false },
+            containerColor = Color(0xFF202027),
+            title = { Text("Subtitle settings", color = Color.White) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = {
+                        player.trackSelectionParameters =
+                            player.trackSelectionParameters.buildUpon()
+                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                                .build()
+                        subtitleDialog = false
+                    }) {
+                        Text("Off", color = Color.White)
+                    }
+                    if (embeddedSubtitleTracks.isEmpty()) {
+                        Text(
+                            "No embedded subtitle track detected.",
+                            color = Color.LightGray,
+                            fontSize = 13.sp
+                        )
+                    } else {
+                        embeddedSubtitleTracks.forEach { (label, target) ->
+                            TextButton(onClick = {
+                                val (mediaTrackGroup, trackIndex) = target
+                                player.trackSelectionParameters =
+                                    player.trackSelectionParameters.buildUpon()
+                                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                                        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                                        .addOverride(TrackSelectionOverride(mediaTrackGroup, listOf(trackIndex)))
+                                        .build()
+                                subtitleDialog = false
+                            }) {
+                                Text(label, color = Color.White)
+                            }
+                        }
+                    }
+                    TextButton(onClick = {
+                        subtitleDialog = false
+                        externalSubtitlePicker.launch(
+                            arrayOf("application/x-subrip", "text/vtt", "text/*", "*/*")
+                        )
+                    }) {
+                        Text("＋ Open external subtitle", color = Color(0xFFFF6B75))
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { subtitleDialog = false }) {
+                    Text("Close", color = Color.White)
+                }
+            }
         )
     }
 }
