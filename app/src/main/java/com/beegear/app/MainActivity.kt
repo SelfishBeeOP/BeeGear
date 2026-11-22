@@ -53,6 +53,7 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import java.net.URL
@@ -76,14 +77,14 @@ private val categories = listOf(
 )
 
 // Mockup Theme Colors
-private val bgDark = Color(0xFF121215)
-private val cardDark = Color(0xFF1E1E24)
-private val tagDark = Color(0xFF2A2A32)
-private val navGlass = Color(0xEB222228)
-private val textMuted = Color(0xFF8E8E98)
-private val accentRed = Color(0xFFE50914)
-private val previewBlue = Color(0xFF2196F3)
-private val starGold = Color(0xFFFFC107)
+private val bgDark = Color(0xFFF5F7FC)
+private val cardDark = Color(0xFFE8EDF7)
+private val tagDark = Color(0xFFE8EDFA)
+private val navGlass = Color(0xEFFFFFFF)
+private val textMuted = Color(0xFF718097)
+private val accentRed = Color(0xFF6579E8)
+private val previewBlue = Color(0xFF7184E8)
+private val starGold = Color(0xFFE0A83A)
 
 private val videoExtensions = listOf(".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".ts")
 private val imageExtensions = listOf(".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -338,6 +339,10 @@ fun BeeGearApp() {
                 loading = recommendationsLoading,
                 onMenuClick = { tab = "BROWSE" },
                 onSeeAll = { tab = "BROWSE" },
+                onCategory = {
+                    stack = emptyList()
+                    openFolder(it.name, it.url)
+                },
                 onOpen = {
                     stack = emptyList()
                     openFolder(it.title, it.url, it.poster)
@@ -367,290 +372,170 @@ private fun HomeScreen(
     loading: Boolean,
     onMenuClick: () -> Unit,
     onSeeAll: () -> Unit,
-    onOpen: (Recommendation) -> Unit
+    onOpen: (Recommendation) -> Unit,
+    onCategory: (Category) -> Unit
+) {
+    val pageState = rememberScrollState()
+    val tabState = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    val sectionOffsets = remember { mutableStateMapOf<String, Int>() }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+
+    Column(
+        Modifier.fillMaxSize()
+            .background(Color(0xFFF5F7FC))
+            .verticalScroll(pageState)
+            .padding(bottom = 112.dp)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Bee", color = Color(0xFF263B62), fontSize = 27.sp, fontWeight = FontWeight.ExtraBold)
+            Text("Gear", color = Color(0xFF6578E8), fontSize = 27.sp, fontWeight = FontWeight.ExtraBold)
+            Spacer(Modifier.weight(1f))
+            Box(
+                Modifier.size(42.dp).clip(CircleShape)
+                    .background(Brush.linearGradient(listOf(Color.White, Color(0xFFE8EDFF))))
+                    .border(1.dp, Color.White, CircleShape)
+                    .clickable { onMenuClick() },
+                contentAlignment = Alignment.Center
+            ) { Text("☰", color = Color(0xFF53688C), fontSize = 20.sp) }
+        }
+
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(tabState)
+                .padding(start = 18.dp, end = 18.dp, bottom = 14.dp),
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val tabs = listOf("Home" to null) + categories.map { it.name to it }
+            tabs.forEach { (label, category) ->
+                Text(
+                    label,
+                    color = if (category == null) Color(0xFF596FE0) else Color(0xFF40516D),
+                    fontSize = 13.sp,
+                    fontWeight = if (category == null) FontWeight.Bold else FontWeight.SemiBold,
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier.clickable {
+                        if (category != null) onCategory(category)
+                        else scope.launch { pageState.animateScrollTo(0) }
+                    }
+                )
+            }
+        }
+
+        val hero = recommendations.firstOrNull()
+        Box(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                .height(205.dp).clip(RoundedCornerShape(24.dp))
+                .background(Brush.linearGradient(listOf(Color(0xFFDCE7FF), Color(0xFFECE5FF), Color(0xFFDDF3F2))))
+                .border(1.dp, Color.White.copy(alpha = .9f), RoundedCornerShape(24.dp))
+                .clickable { if (hero != null) onOpen(hero) }
+        ) {
+            if (hero?.poster != null) NetworkPoster(hero.poster, Modifier.fillMaxSize())
+            Box(Modifier.fillMaxSize().background(
+                Brush.horizontalGradient(listOf(Color(0xCCFFFFFF), Color(0x44FFFFFF), Color.Transparent))
+            ))
+            Column(Modifier.align(Alignment.CenterStart).padding(20.dp).widthIn(max = 250.dp)) {
+                Text("FEATURED FOR YOU", color = Color(0xFF6578D8), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.2.sp)
+                Spacer(Modifier.height(7.dp))
+                Text(hero?.title ?: "Discover something to watch", color = Color(0xFF263B5B), fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(hero?.subtitle ?: "Movies and series from your ISP library", color = Color(0xFF536783), fontSize = 11.sp, maxLines = 1)
+                Spacer(Modifier.height(12.dp))
+                Box(Modifier.clip(RoundedCornerShape(50)).background(Color(0xFF6479E8)).clickable { if (hero != null) onOpen(hero) }.padding(horizontal = 17.dp, vertical = 9.dp)) {
+                    Text("▶  PLAY NOW", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        GlassCategorySection(
+            title = "Popular Movies",
+            items = recommendations.filter { !it.subtitle.contains("Series", true) }.ifEmpty { recommendations },
+            onSeeAll = onSeeAll,
+            onOpen = onOpen
+        )
+
+        categories.forEach { category ->
+            val sectionItems = recommendations.filter {
+                it.subtitle.equals(category.name, ignoreCase = true) ||
+                    it.subtitle.contains(category.name, ignoreCase = true)
+            }
+            GlassCategorySection(
+                title = category.name,
+                items = sectionItems,
+                onSeeAll = { onCategory(category) },
+                onOpen = onOpen,
+                emptyLoading = loading && recommendations.isEmpty(),
+                emptyText = if (loading) "Loading from ISP server..." else "Open to browse this category"
+            )
+        }
+
+        GlassCategorySection(
+            title = "New Episodes",
+            items = recommendations.filter { it.subtitle.contains("Series", true) }.ifEmpty { recommendations.asReversed() },
+            onSeeAll = onSeeAll,
+            onOpen = onOpen
+        )
+    }
+}
+
+@Composable
+private fun GlassCategorySection(
+    title: String,
+    items: List<Recommendation>,
+    onSeeAll: () -> Unit,
+    onOpen: (Recommendation) -> Unit,
+    emptyLoading: Boolean = false,
+    emptyText: String = "No preview items loaded"
 ) {
     Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(bottom = 100.dp)
-    ) {
-        // Top Bar: Hamburger Icon + Red Brand Emblem
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 16.dp)
-        ) {
-            Column(
-                Modifier
-                    .align(Alignment.CenterStart)
-                    .clickable { onMenuClick() }
-                    .padding(4.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Box(Modifier.width(20.dp).height(2.dp).background(Color.White, CircleShape))
-                Box(Modifier.width(14.dp).height(2.dp).background(Color.White, CircleShape))
-                Box(Modifier.width(10.dp).height(2.dp).background(Color.White, CircleShape))
-            }
-
-            // Center Red App Emblem
-            Row(
-                Modifier.align(Alignment.Center),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    Modifier
-                        .size(28.dp)
-                        .clip(RoundedCornerShape(7.dp))
-                        .background(accentRed),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("B", color = Color.White, fontWeight = FontWeight.Black, fontSize = 17.sp)
-                }
-            }
-        }
-
-        // Hero Header Title ("MAJOR MOVIE PREMIERES")
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 4.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = buildAnnotatedString {
-                    withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.Black, fontSize = 24.sp)) {
-                        append("MAJOR ")
-                    }
-                    withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)) {
-                        append("MOVIE\n")
-                    }
-                    withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)) {
-                        append("OF ")
-                    }
-                    withStyle(SpanStyle(color = accentRed, fontWeight = FontWeight.Black, fontSize = 22.sp)) {
-                        append("PREMIERES")
-                    }
-                },
-                textAlign = TextAlign.Center,
-                lineHeight = 24.sp
-            )
-            Text(
-                "ISP STREAMING",
-                color = Color.White.copy(alpha = 0.85f),
-                fontSize = 14.sp,
-                fontWeight = FontWeight.ExtraBold,
-                letterSpacing = 2.sp,
-                modifier = Modifier.padding(top = 2.dp)
-            )
-        }
-
-        Spacer(Modifier.height(14.dp))
-
-        // Featured Carousel Cards (Center Card with Preview Pill & Side Peek Cards)
-        if (loading && recommendations.isEmpty()) {
-            Box(Modifier.fillMaxWidth().height(250.dp), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = accentRed)
-            }
-        } else if (recommendations.isNotEmpty()) {
-            LazyRow(
-                contentPadding = PaddingValues(horizontal = 42.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                itemsIndexed(recommendations.take(6)) { index, item ->
-                    HeroCarouselCard(
-                        item = item,
-                        rating = String.format("%.1f", 4.5 - (index * 0.2)),
-                        onClick = { onOpen(item) }
-                    )
-                }
-            }
-        }
-
-        // Section 1: Popular Movies
-        SectionHeader(title = "Popular Movies", onSeeAll = onSeeAll)
-        val moviesList = recommendations.filter { !it.subtitle.contains("Series", true) }.ifEmpty { recommendations }
-        PosterRail(items = moviesList, onOpen = onOpen)
-
-        // Section 2: New Episode
-        SectionHeader(title = "New Episode", onSeeAll = onSeeAll)
-        val seriesList = recommendations.filter { it.subtitle.contains("Series", true) }.ifEmpty { recommendations.asReversed() }
-        PosterRail(items = seriesList, onOpen = onOpen)
-
-        if (recommendations.isEmpty() && !loading) {
-            Text(
-                "সার্ভার থেকে রেকমেন্ডেশন পাওয়া যায়নি। বাম পাশের মেনু বা Browse থেকে ক্যাটাগরি খুলে দেখুন।",
-                Modifier.padding(20.dp),
-                color = textMuted,
-                fontSize = 13.sp,
-                textAlign = TextAlign.Center
-            )
-        }
-    }
-}
-
-@Composable
-private fun HeroCarouselCard(item: Recommendation, rating: String, onClick: () -> Unit) {
-    Box(
-        Modifier
-            .width(245.dp)
-            .height(275.dp)
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
             .clip(RoundedCornerShape(22.dp))
-            .background(cardDark)
-            .clickable { onClick() }
+            .background(Color.White.copy(alpha = .78f))
+            .border(1.dp, Color.White, RoundedCornerShape(22.dp))
+            .padding(vertical = 13.dp)
     ) {
-        if (item.poster != null) {
-            NetworkPoster(item.poster, Modifier.fillMaxSize())
-        }
-        // Bottom Dark Gradient Overlay
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f)),
-                        startY = 140f
-                    )
-                )
-        )
-
-        // Bottom Glass Info Card inside Poster (Matches Mockup)
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .padding(12.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(Color(0xCC1E1E24))
-                .padding(12.dp)
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = item.title,
-                    color = Color.White,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                Spacer(Modifier.width(6.dp))
-                Text("★ $rating", color = starGold, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            }
-
-            Spacer(Modifier.height(6.dp))
-
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = item.subtitle,
-                    color = textMuted,
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                Spacer(Modifier.width(8.dp))
-                Box(
-                    Modifier
-                        .clip(CircleShape)
-                        .background(previewBlue)
-                        .padding(horizontal = 12.dp, vertical = 4.dp)
-                ) {
-                    Text("Preview", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                }
-            }
+            Text(title, color = Color(0xFF293D5D), fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text("See all  ›", color = Color(0xFF6579E5), fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { onSeeAll() })
         }
-    }
-}
-
-@Composable
-private fun SectionHeader(title: String, onSeeAll: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.weight(1f))
-        Text(
-            "See all ›",
-            color = textMuted,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.clickable { onSeeAll() }
-        )
-    }
-}
-
-@Composable
-private fun PosterRail(items: List<Recommendation>, onOpen: (Recommendation) -> Unit) {
-    LazyRow(
-        contentPadding = PaddingValues(horizontal = 20.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        items(items.take(10), key = { it.url }) { item ->
-            Box(
-                Modifier
-                    .width(126.dp)
-                    .height(168.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(cardDark)
-                    .clickable { onOpen(item) }
+        if (items.isEmpty()) {
+            if (emptyLoading) {
+                Box(Modifier.fillMaxWidth().height(82.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = Color(0xFF7184E8), modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+                }
+            } else {
+                Text(emptyText, color = Color(0xFF8A96A9), fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp))
+            }
+        } else {
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(11.dp)
             ) {
-                if (item.poster != null) {
-                    NetworkPoster(item.poster, Modifier.fillMaxSize())
-                }
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color.Transparent, Color.Black.copy(alpha = 0.9f)),
-                                startY = 90f
-                            )
-                        )
-                )
-
-                // Red Play Badge on Bottom Right (Matches Mockup)
-                Box(
-                    Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(10.dp)
-                        .size(24.dp)
-                        .clip(CircleShape)
-                        .background(accentRed),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("▶", color = Color.White, fontSize = 9.sp)
-                }
-
-                Column(
-                    Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(start = 10.dp, end = 36.dp, bottom = 10.dp)
-                ) {
-                    Text(
-                        item.title,
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        "★ 4.4  •  HD",
-                        color = starGold,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
+                items(items.take(12), key = { it.url }) { item ->
+                    Column(
+                        Modifier.width(190.dp).clip(RoundedCornerShape(15.dp))
+                            .background(Brush.linearGradient(listOf(Color(0xFFF5F7FF), Color(0xFFE9EEFA))))
+                            .border(1.dp, Color.White, RoundedCornerShape(15.dp))
+                            .clickable { onOpen(item) }
+                            .padding(7.dp)
+                    ) {
+                        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(10.dp)).background(Color(0xFFDCE4F2))) {
+                            if (item.poster != null) NetworkPoster(item.poster, Modifier.fillMaxSize())
+                            else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text("BeeGear", color = Color(0xFF7182C8), fontSize = 13.sp, fontWeight = FontWeight.ExtraBold)
+                            }
+                        }
+                        Text(item.title, color = Color(0xFF2C3E5C), fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 7.dp, start = 3.dp, end = 3.dp))
+                        Text(item.subtitle, color = Color(0xFF8491A6), fontSize = 10.sp, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 3.dp, bottom = 2.dp))
+                    }
                 }
             }
         }
@@ -1094,41 +979,40 @@ private fun FloatingBottomNav(
     modifier: Modifier = Modifier
 ) {
     val navItems = listOf(
-        "HOME" to "⌂",
-        "BROWSE" to "⌕",
-        "TRENDING" to "🔥",
-        "FAVORITES" to "♥"
+        Triple("HOME", "⌂", "Home"),
+        Triple("BROWSE", "◈", "Explore"),
+        Triple("TRENDING", "✦", "Trending"),
+        Triple("FAVORITES", "♡", "My List")
     )
     Surface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(28.dp),
-        color = navGlass,
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
-        shadowElevation = 12.dp
+        shape = RoundedCornerShape(30.dp),
+        color = Color.White.copy(alpha = .88f),
+        border = BorderStroke(1.dp, Color.White),
+        shadowElevation = 18.dp
     ) {
         Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(vertical = 10.dp, horizontal = 16.dp),
-            horizontalArrangement = Arrangement.SpaceAround,
+            Modifier.fillMaxWidth().padding(vertical = 9.dp, horizontal = 9.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            navItems.forEach { (key, icon) ->
-                val isSelected = tab == key
-                Box(
-                    Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(if (isSelected) Color.White else Color.Transparent)
-                        .clickable { onSelect(key) },
-                    contentAlignment = Alignment.Center
+            navItems.forEach { (key, icon, label) ->
+                val selected = tab == key
+                Column(
+                    Modifier.weight(1f).clip(RoundedCornerShape(18.dp))
+                        .clickable { onSelect(key) }.padding(vertical = 5.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
                 ) {
-                    Text(
-                        text = icon,
-                        color = if (isSelected) Color.Black else textMuted,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Box(
+                        Modifier.size(43.dp).clip(CircleShape)
+                            .background(if (selected) Brush.linearGradient(listOf(Color(0xFFE4E9FF), Color(0xFFF1E8FF))) else Brush.linearGradient(listOf(Color.Transparent, Color.Transparent)))
+                            .border(if (selected) 1.dp else 0.dp, if (selected) Color(0xFFDCE3FF) else Color.Transparent, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(icon, color = if (selected) Color(0xFF596FE0) else Color(0xFF718097), fontSize = 27.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Text(label, color = if (selected) Color(0xFF596FE0) else Color(0xFF718097), fontSize = 10.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, maxLines = 1, softWrap = false)
                 }
             }
         }
