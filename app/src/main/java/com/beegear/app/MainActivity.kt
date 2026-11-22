@@ -16,6 +16,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -65,6 +69,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
+import org.json.JSONArray
+import org.json.JSONObject
 import java.net.URL
 import java.net.URLDecoder
 
@@ -72,6 +78,7 @@ data class Category(val name: String, val url: String)
 data class MediaEntry(val name: String, val url: String, val isFolder: Boolean, val isVideo: Boolean, val isImage: Boolean)
 data class FolderLocation(val title: String, val url: String, val poster: String? = null)
 data class Recommendation(val title: String, val url: String, val poster: String?, val subtitle: String)
+data class SearchHit(val title: String, val url: String, val poster: String?, val subtitle: String, val isVideo: Boolean)
 
 private val categories = listOf(
     Category("English Movies", "http://172.16.50.7/DHAKA-FLIX-7/English%20Movies/"),
@@ -188,6 +195,46 @@ private suspend fun loadRecommendations(): List<Recommendation> {
 }
 
 
+/** Search the configured ISP category roots and a limited number of child folders. */
+private suspend fun searchAllCategories(query: String): List<SearchHit> = withContext(Dispatchers.IO) {
+    val needle = query.trim().lowercase()
+    if (needle.isBlank()) return@withContext emptyList()
+    val found = mutableListOf<SearchHit>()
+    val seen = mutableSetOf<String>()
+    for (category in categories) {
+        val root = scanFolder(category.url).getOrNull().orEmpty()
+        for (entry in root.filter { it.isFolder || it.isVideo }.take(8)) {
+            if (entry.isFolder) {
+                val contents = scanFolder(entry.url).getOrNull().orEmpty()
+                val poster = contents.firstOrNull { it.isImage }?.url
+                if (entry.name.lowercase().contains(needle) && contents.any { it.isVideo } && seen.add(entry.url)) {
+                    found.add(SearchHit(entry.name, entry.url, poster, category.name, false))
+                }
+                for (child in contents.filter { it.isFolder }.take(6)) {
+                    val childItems = scanFolder(child.url).getOrNull().orEmpty()
+                    if (child.name.lowercase().contains(needle) && childItems.any { it.isVideo } && seen.add(child.url)) {
+                        found.add(SearchHit(child.name, child.url, childItems.firstOrNull { it.isImage }?.url ?: poster, category.name, false))
+                    }
+                    for (video in childItems.filter { it.isVideo }) {
+                        if (video.name.lowercase().contains(needle) && seen.add(video.url)) {
+                            found.add(SearchHit(video.name, video.url, null, category.name, true))
+                        }
+                    }
+                }
+                for (video in contents.filter { it.isVideo }) {
+                    if (video.name.lowercase().contains(needle) && seen.add(video.url)) {
+                        found.add(SearchHit(video.name, video.url, poster, category.name, true))
+                    }
+                }
+            } else if (entry.isVideo && entry.name.lowercase().contains(needle) && seen.add(entry.url)) {
+                found.add(SearchHit(entry.name, entry.url, null, category.name, true))
+            }
+        }
+    }
+    found.take(80)
+}
+
+
 private val subtitleExtensions = listOf(".srt", ".vtt", ".ass", ".ssa")
 
 private fun subtitleMimeType(uriOrName: String): String? {
@@ -265,7 +312,52 @@ fun BeeGearApp() {
     var playingTitle by remember { mutableStateOf("") }
     var recommendations by remember { mutableStateOf(emptyList<Recommendation>()) }
     var recommendationsLoading by remember { mutableStateOf(true) }
-    var favorites by remember { mutableStateOf(emptyList<Recommendation>()) }
+    var favorites by remember {
+        mutableStateOf(run {
+            val raw = appContext.getSharedPreferences("beegear_settings", android.content.Context.MODE_PRIVATE)
+                .getString("saved_items", "[]") ?: "[]"
+            try {
+                val array = JSONArray(raw)
+                (0 until array.length()).mapNotNull { i ->
+                    val o = array.optJSONObject(i) ?: return@mapNotNull null
+                    Recommendation(o.optString("title"), o.optString("url"), o.optString("poster").ifBlank { null }, o.optString("subtitle"))
+                }
+            } catch (_: Exception) { emptyList() }
+        })
+    }
+    var recentlyWatched by remember {
+        mutableStateOf(run {
+            val raw = appContext.getSharedPreferences("beegear_settings", android.content.Context.MODE_PRIVATE)
+                .getString("recent_items", "[]") ?: "[]"
+            try {
+                val array = JSONArray(raw)
+                (0 until array.length()).mapNotNull { i ->
+                    val o = array.optJSONObject(i) ?: return@mapNotNull null
+                    Recommendation(o.optString("title"), o.optString("url"), o.optString("poster").ifBlank { null }, o.optString("subtitle"))
+                }
+            } catch (_: Exception) { emptyList() }
+        })
+    }
+
+    LaunchedEffect(recentlyWatched) {
+        val array = JSONArray()
+        recentlyWatched.forEach { item ->
+            array.put(JSONObject().put("title", item.title).put("url", item.url)
+                .put("poster", item.poster ?: "").put("subtitle", item.subtitle))
+        }
+        appContext.getSharedPreferences("beegear_settings", android.content.Context.MODE_PRIVATE)
+            .edit().putString("recent_items", array.toString()).apply()
+    }
+
+    LaunchedEffect(favorites) {
+        val array = JSONArray()
+        favorites.forEach { item ->
+            array.put(JSONObject().put("title", item.title).put("url", item.url)
+                .put("poster", item.poster ?: "").put("subtitle", item.subtitle))
+        }
+        appContext.getSharedPreferences("beegear_settings", android.content.Context.MODE_PRIVATE)
+            .edit().putString("saved_items", array.toString()).apply()
+    }
 
     fun openFolder(title: String, url: String, poster: String? = null) {
         if (currentUrl.isNotBlank()) {
@@ -357,7 +449,12 @@ fun BeeGearApp() {
                 },
                 onBack = { back() },
                 onFolder = { openFolder(it.name, it.url) },
-                onVideo = { playingTitle = it.name; playingUrl = it.url }
+                onVideo = { video -> recentlyWatched = (listOf(Recommendation(video.name, video.url, currentPoster, "Continue Watching")) + recentlyWatched).distinctBy { it.url }.take(12); playingTitle = video.name; playingUrl = video.url }
+            )
+
+            tab == "SEARCH" -> SearchScreen(
+                onOpenFolder = { hit -> stack = emptyList(); openFolder(hit.title, hit.url, hit.poster) },
+                onPlayVideo = { hit -> recentlyWatched = (listOf(Recommendation(hit.title, hit.url, hit.poster, "Continue Watching")) + recentlyWatched).distinctBy { it.url }.take(12); playingTitle = hit.title; playingUrl = hit.url }
             )
 
             tab == "BROWSE" -> BrowseScreen(
@@ -395,6 +492,7 @@ fun BeeGearApp() {
                         .edit().putBoolean("dark_theme", appDarkMode).apply()
                 },
                 loading = recommendationsLoading,
+                continueWatching = recentlyWatched,
                 onMenuClick = { tab = "BROWSE" },
                 onSeeAll = { tab = "BROWSE" },
                 onCategory = {
@@ -404,7 +502,12 @@ fun BeeGearApp() {
                 onOpen = {
                     stack = emptyList()
                     openFolder(it.title, it.url, it.poster)
-                }
+                },
+                onToggleFavorite = { item ->
+                    favorites = if (favorites.any { it.url == item.url }) favorites.filterNot { it.url == item.url } else favorites + item
+                },
+                onContinueOpen = { item -> playingTitle = item.title; playingUrl = item.url },
+                onSearchClick = { tab = "SEARCH" }
             )
         }
 
@@ -430,10 +533,14 @@ private fun HomeScreen(
     isDarkTheme: Boolean,
     onToggleTheme: () -> Unit,
     loading: Boolean,
+    continueWatching: List<Recommendation>,
     onMenuClick: () -> Unit,
     onSeeAll: () -> Unit,
     onOpen: (Recommendation) -> Unit,
-    onCategory: (Category) -> Unit
+    onCategory: (Category) -> Unit,
+    onToggleFavorite: (Recommendation) -> Unit,
+    onContinueOpen: (Recommendation) -> Unit,
+    onSearchClick: () -> Unit
 ) {
     val pageState = rememberScrollState()
     val tabState = rememberScrollState()
@@ -463,11 +570,11 @@ private fun HomeScreen(
             Spacer(Modifier.width(9.dp))
             Box(
                 Modifier.size(42.dp).clip(CircleShape)
-                    .background(Brush.linearGradient(listOf(Color.White, Color(0xFFE8EDFF))))
-                    .border(1.dp, Color.White, CircleShape)
+                    .background(if (isDarkTheme) Color(0xFF30384B) else Color(0xFFE8EDFF))
+                    .border(1.dp, if (isDarkTheme) Color(0xFF59647A) else Color.White, CircleShape)
                     .clickable { onMenuClick() },
                 contentAlignment = Alignment.Center
-            ) { Text("☰", color = Color(0xFF53688C), fontSize = 20.sp) }
+            ) { Text("☰", color = if (isDarkTheme) Color.White else Color(0xFF53688C), fontSize = 20.sp) }
         }
 
         Row(
@@ -480,7 +587,7 @@ private fun HomeScreen(
             tabs.forEach { (label, category) ->
                 Text(
                     label,
-                    color = if (category == null) Color(0xFF596FE0) else Color(0xFF40516D),
+                    color = if (category == null) accentRed else primaryText,
                     fontSize = 13.sp,
                     fontWeight = if (category == null) FontWeight.Bold else FontWeight.SemiBold,
                     maxLines = 1,
@@ -493,28 +600,79 @@ private fun HomeScreen(
             }
         }
 
-        val hero = recommendations.firstOrNull()
-        Box(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp)
-                .height(205.dp).clip(RoundedCornerShape(24.dp))
-                .background(Brush.linearGradient(listOf(Color(0xFFDCE7FF), Color(0xFFECE5FF), Color(0xFFDDF3F2))))
-                .border(1.dp, Color.White.copy(alpha = .9f), RoundedCornerShape(24.dp))
-                .clickable { if (hero != null) onOpen(hero) }
-        ) {
-            if (hero?.poster != null) NetworkPoster(hero.poster, Modifier.fillMaxSize())
-            Box(Modifier.fillMaxSize().background(
-                Brush.horizontalGradient(listOf(Color(0xCCFFFFFF), Color(0x44FFFFFF), Color.Transparent))
-            ))
-            Column(Modifier.align(Alignment.CenterStart).padding(20.dp).widthIn(max = 250.dp)) {
-                Text("FEATURED FOR YOU", color = Color(0xFF6578D8), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.2.sp)
-                Spacer(Modifier.height(7.dp))
-                Text(hero?.title ?: "Discover something to watch", color = Color(0xFF263B5B), fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(hero?.subtitle ?: "Movies and series from your ISP library", color = Color(0xFF536783), fontSize = 11.sp, maxLines = 1)
-                Spacer(Modifier.height(12.dp))
-                Box(Modifier.clip(RoundedCornerShape(50)).background(Color(0xFF6479E8)).clickable { if (hero != null) onOpen(hero) }.padding(horizontal = 17.dp, vertical = 9.dp)) {
-                    Text("▶  PLAY NOW", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        val featured = recommendations.take(8)
+        val featuredState = rememberLazyListState()
+        LaunchedEffect(featured.size) {
+            if (featured.size > 1) {
+                while (true) {
+                    kotlinx.coroutines.delay(5500)
+                    val next = (featuredState.firstVisibleItemIndex + 1) % featured.size
+                    featuredState.animateScrollToItem(next)
                 }
             }
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Featured for You", color = primaryText, fontSize = 19.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text("7–8 picks", color = textMuted, fontSize = 11.sp)
+        }
+        if (featured.isEmpty()) {
+            Box(Modifier.fillMaxWidth().height(230.dp), contentAlignment = Alignment.Center) {
+                if (loading) CircularProgressIndicator(color = accentRed) else Text("Your ISP library is ready to explore", color = textMuted)
+            }
+        } else {
+            LazyRow(
+                state = featuredState,
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                items(featured, key = { it.url }) { item ->
+                    Box(
+                        Modifier.width(278.dp).aspectRatio(2f / 3f).clip(RoundedCornerShape(22.dp))
+                            .background(cardDark).clickable { onOpen(item) }
+                    ) {
+                        if (item.poster != null) NetworkPoster(item.poster, Modifier.fillMaxSize())
+                        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000), Color(0xF0000000)))))
+                        Column(Modifier.align(Alignment.BottomStart).padding(17.dp)) {
+                            Text("FEATURED • ${item.subtitle.uppercase()}", color = Color.White.copy(alpha = .82f), fontSize = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                            Spacer(Modifier.height(5.dp))
+                            Text(item.title, color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Spacer(Modifier.height(10.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.clip(RoundedCornerShape(50)).background(Color.White).clickable { onOpen(item) }.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                                    Text("▶  Play", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Box(Modifier.clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = .20f)).border(1.dp, Color.White.copy(alpha = .45f), RoundedCornerShape(50)).clickable { onOpen(item) }.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                    Text("＋ My List", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 20.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Continue Watching", color = primaryText, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        }
+        if (continueWatching.isEmpty()) {
+            Text("Play something from your ISP library and it will appear here.", color = textMuted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp))
+        } else {
+            LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(11.dp)) {
+                items(continueWatching, key = { it.url }) { item ->
+                    Column(Modifier.width(210.dp).clip(RoundedCornerShape(14.dp)).background(cardDark).clickable { onContinueOpen(item) }) {
+                        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(if (appDarkMode) Color(0xFF25252D) else Color(0xFFE4EAF4))) {
+                            if (item.poster != null) NetworkPoster(item.poster, Modifier.fillMaxSize())
+                            Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color(0xFF687080)))
+                        }
+                        Text(item.title, color = primaryText, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(9.dp))
+                    }
+                }
+            }
+        }
+
+        Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 20.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Browse by Category", color = primaryText, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text("Search all", color = accentRed, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { onSearchClick() })
         }
 
         GlassCategorySection(
@@ -559,49 +717,30 @@ private fun GlassCategorySection(
 ) {
     Column(
         Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
-            .clip(RoundedCornerShape(22.dp))
-            .background(Color.White.copy(alpha = .78f))
-            .border(1.dp, Color.White, RoundedCornerShape(22.dp))
+            .clip(RoundedCornerShape(20.dp)).background(cardDark)
+            .border(1.dp, if (appDarkMode) Color.White.copy(alpha = .08f) else Color(0xFFDDE4F0), RoundedCornerShape(20.dp))
             .padding(vertical = 13.dp)
     ) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 3.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(title, color = Color(0xFF293D5D), fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            Text("See all  ›", color = Color(0xFF6579E5), fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { onSeeAll() })
+        Row(Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, color = primaryText, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text("See all  ›", color = accentRed, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { onSeeAll() })
         }
         if (items.isEmpty()) {
-            if (emptyLoading) {
-                Box(Modifier.fillMaxWidth().height(82.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = Color(0xFF7184E8), modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
-                }
-            } else {
-                Text(emptyText, color = Color(0xFF8A96A9), fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp))
-            }
+            if (emptyLoading) Box(Modifier.fillMaxWidth().height(82.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = accentRed, modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+            } else Text(emptyText, color = textMuted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp))
         } else {
-            LazyRow(
-                contentPadding = PaddingValues(horizontal = 14.dp),
-                horizontalArrangement = Arrangement.spacedBy(11.dp)
-            ) {
+            LazyRow(contentPadding = PaddingValues(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(11.dp)) {
                 items(items.take(12), key = { it.url }) { item ->
-                    Column(
-                        Modifier.width(190.dp).clip(RoundedCornerShape(15.dp))
-                            .background(Brush.linearGradient(listOf(Color(0xFFF5F7FF), Color(0xFFE9EEFA))))
-                            .border(1.dp, Color.White, RoundedCornerShape(15.dp))
-                            .clickable { onOpen(item) }
-                            .padding(7.dp)
-                    ) {
-                        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(10.dp)).background(Color(0xFFDCE4F2))) {
+                    Column(Modifier.width(124.dp).clip(RoundedCornerShape(13.dp)).background(if (appDarkMode) Color(0xFF171B25) else Color(0xFFF8FAFE))
+                        .border(1.dp, if (appDarkMode) Color.White.copy(alpha = .07f) else Color(0xFFE1E7F0), RoundedCornerShape(13.dp))
+                        .clickable { onOpen(item) }) {
+                        Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).background(if (appDarkMode) Color(0xFF252B38) else Color(0xFFE1E7F0))) {
                             if (item.poster != null) NetworkPoster(item.poster, Modifier.fillMaxSize())
-                            else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Text("BeeGear", color = Color(0xFF7182C8), fontSize = 13.sp, fontWeight = FontWeight.ExtraBold)
-                            }
+                            else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("BeeGear", color = accentRed, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold) }
                         }
-                        Text(item.title, color = Color(0xFF2C3E5C), fontSize = 12.sp, fontWeight = FontWeight.Bold,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 7.dp, start = 3.dp, end = 3.dp))
-                        Text(item.subtitle, color = Color(0xFF8491A6), fontSize = 10.sp, maxLines = 1,
-                            overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 3.dp, bottom = 2.dp))
+                        Text(item.title, color = primaryText, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp))
                     }
                 }
             }
@@ -766,7 +905,7 @@ private fun MediaDetailsScreen(
                 ) {
                     Text(
                         if (isFavorite) "♥" else "♡",
-                        color = if (isFavorite) accentRed else Color.White,
+                        color = if (isFavorite) accentRed else primaryText,
                         fontSize = 16.sp
                     )
                 }
@@ -869,7 +1008,7 @@ private fun MediaDetailsScreen(
 }
 
 @Composable
-private fun MetaChip(label: String, textColor: Color = Color.White) {
+private fun MetaChip(label: String, textColor: Color = primaryText) {
     Box(
         Modifier
             .clip(RoundedCornerShape(10.dp))
@@ -896,7 +1035,7 @@ private fun FolderCard(folder: MediaEntry, modifier: Modifier, onClick: () -> Un
             Modifier
                 .fillMaxWidth()
                 .height(150.dp)
-                .background(Color(0xFF25252D)),
+                .background(if (appDarkMode) Color(0xFF25252D) else Color(0xFFE4EAF4)),
             contentAlignment = Alignment.Center
         ) {
             if (poster != null) {
@@ -920,6 +1059,50 @@ private fun FolderCard(folder: MediaEntry, modifier: Modifier, onClick: () -> Un
 /* ============================================================================
    3. BROWSE & SAVED SCREENS
    ============================================================================ */
+@Composable
+private fun SearchScreen(onOpenFolder: (SearchHit) -> Unit, onPlayVideo: (SearchHit) -> Unit) {
+    var query by remember { mutableStateOf("") }
+    var results by remember { mutableStateOf(emptyList<SearchHit>()) }
+    var loading by remember { mutableStateOf(false) }
+    var searched by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    Column(Modifier.fillMaxSize().background(bgDark).padding(horizontal = 18.dp).padding(bottom = 94.dp)) {
+        Text("Search", color = primaryText, fontSize = 26.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(top = 22.dp, bottom = 14.dp))
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(cardDark).border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(16.dp)).padding(horizontal = 14.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("⌕", color = textMuted, fontSize = 22.sp)
+            BasicTextField(value = query, onValueChange = { query = it }, singleLine = true,
+                textStyle = androidx.compose.ui.text.TextStyle(color = primaryText, fontSize = 15.sp),
+                modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+                decorationBox = { inner -> Box { if (query.isEmpty()) Text("Search all ISP movies and series", color = textMuted, fontSize = 13.sp); inner() } })
+            Text("Search", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(accentRed).clickable(enabled = query.isNotBlank() && !loading) {
+                    scope.launch { loading = true; searched = true; error = ""; results = searchAllCategories(query); loading = false }
+                }.padding(horizontal = 13.dp, vertical = 10.dp))
+        }
+        if (loading) Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = accentRed) }
+        else if (error.isNotBlank()) Text(error, color = Color(0xFFFF7777), modifier = Modifier.padding(12.dp))
+        else if (searched && results.isEmpty()) Text("No matching content found in the configured ISP folders.", color = textMuted, fontSize = 13.sp, modifier = Modifier.padding(top = 20.dp))
+        else if (!searched) Text("Search checks the configured ISP categories, including nested folders.", color = textMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 18.dp))
+        else Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(top = 12.dp)) {
+            Text("${results.size} result(s)", color = textMuted, fontSize = 12.sp, modifier = Modifier.padding(bottom = 8.dp))
+            results.forEach { hit ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 5.dp).clip(RoundedCornerShape(14.dp)).background(cardDark).clickable { if (hit.isVideo) onPlayVideo(hit) else onOpenFolder(hit) }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(58.dp, 76.dp).clip(RoundedCornerShape(8.dp)).background(if (appDarkMode) Color(0xFF30384B) else Color(0xFFE4EAF4))) {
+                        if (hit.poster != null) NetworkPoster(hit.poster, Modifier.fillMaxSize()) else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (hit.isVideo) "▶" else "▣", color = accentRed) }
+                    }
+                    Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                        Text(hit.title, color = primaryText, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(hit.subtitle, color = textMuted, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+                        Text(if (hit.isVideo) "Video file" else "Open folder", color = accentRed, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
+                    }
+                    Text("›", color = textMuted, fontSize = 24.sp)
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun BrowseScreen(onCategory: (Category) -> Unit) {
     Column(
@@ -1011,7 +1194,7 @@ private fun TrendingOrSavedScreen(
                                 Modifier
                                     .fillMaxWidth()
                                     .height(175.dp)
-                                    .background(Color(0xFF25252D)),
+                                    .background(if (appDarkMode) Color(0xFF25252D) else Color(0xFFE4EAF4)),
                                 contentAlignment = Alignment.Center
                             ) {
                                 if (item.poster != null) NetworkPoster(item.poster, Modifier.fillMaxSize())
@@ -1040,46 +1223,29 @@ private fun TrendingOrSavedScreen(
    4. FLOATING PILL BOTTOM NAVIGATION BAR (Matches Mockup)
    ============================================================================ */
 @Composable
-private fun FloatingBottomNav(
-    tab: String,
-    onSelect: (String) -> Unit,
-    modifier: Modifier = Modifier
-) {
+private fun FloatingBottomNav(tab: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
     val navItems = listOf(
         Triple("HOME", "⌂", "Home"),
-        Triple("BROWSE", "◈", "Explore"),
-        Triple("TRENDING", "✦", "Trending"),
-        Triple("FAVORITES", "♡", "My List")
+        Triple("SEARCH", "⌕", "Search"),
+        Triple("BROWSE", "◎", "Explore"),
+        Triple("TRENDING", "▤", "Trending"),
+        Triple("FAVORITES", "▣", "My List")
     )
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(30.dp),
-        color = navGlass,
-        border = BorderStroke(1.dp, if (appDarkMode) Color(0xFF3A4050) else Color.White),
-        shadowElevation = 18.dp
-    ) {
-        Row(
-            Modifier.fillMaxWidth().padding(vertical = 9.dp, horizontal = 9.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+    val selectedIndex = navItems.indexOfFirst { it.first == tab }.coerceAtLeast(0)
+    BoxWithConstraints(modifier.fillMaxWidth().height(68.dp).clip(RoundedCornerShape(34.dp))
+        .background(Color.White.copy(alpha = if (appDarkMode) .10f else .34f))
+        .border(1.dp, Color.White.copy(alpha = .32f), RoundedCornerShape(34.dp))) {
+        val itemWidth = maxWidth / navItems.size
+        val indicatorX by animateDpAsState(targetValue = itemWidth * selectedIndex + (itemWidth - 42.dp) / 2, animationSpec = tween(420), label = "liquidGlassPosition")
+        Box(Modifier.offset(x = indicatorX, y = 8.dp).size(42.dp).clip(CircleShape)
+            .background(Brush.linearGradient(listOf(Color.White.copy(alpha = .34f), Color.White.copy(alpha = .10f), Color(0xFF8DA8FF).copy(alpha = .18f))))
+            .border(1.dp, Color.White.copy(alpha = .58f), CircleShape))
+        Row(Modifier.fillMaxSize().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             navItems.forEach { (key, icon, label) ->
                 val selected = tab == key
-                Column(
-                    Modifier.weight(1f).clip(RoundedCornerShape(18.dp))
-                        .clickable { onSelect(key) }.padding(vertical = 5.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Box(
-                        Modifier.size(43.dp).clip(CircleShape)
-                            .background(if (selected) Brush.linearGradient(listOf(Color(0xFFE4E9FF), Color(0xFFF1E8FF))) else Brush.linearGradient(listOf(Color.Transparent, Color.Transparent)))
-                            .border(if (selected) 1.dp else 0.dp, if (selected) Color(0xFFDCE3FF) else Color.Transparent, CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(icon, color = if (selected) Color(0xFF596FE0) else Color(0xFF718097), fontSize = 27.sp, fontWeight = FontWeight.Bold)
-                    }
-                    Text(label, color = if (selected) Color(0xFF596FE0) else Color(0xFF718097), fontSize = 10.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, maxLines = 1, softWrap = false)
+                Column(Modifier.weight(1f).fillMaxHeight().clickable { onSelect(key) }, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    Text(icon, color = if (selected) primaryText else textMuted, fontSize = 23.sp, fontWeight = FontWeight.Bold)
+                    Text(label, color = if (selected) primaryText else textMuted, fontSize = 9.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
                 }
             }
         }
@@ -1106,7 +1272,7 @@ private fun NetworkPoster(url: String, modifier: Modifier = Modifier) {
     if (bitmap != null) {
         Image(bitmap!!.asImageBitmap(), null, modifier, contentScale = ContentScale.Crop)
     } else {
-        Box(modifier.background(Color(0xFF24242C)), contentAlignment = Alignment.Center) {
+        Box(modifier.background(if (appDarkMode) Color(0xFF24242C) else Color(0xFFE4EAF4)), contentAlignment = Alignment.Center) {
             Text("BEEGEAR", color = accentRed, fontWeight = FontWeight.Black, fontSize = 11.sp)
         }
     }
