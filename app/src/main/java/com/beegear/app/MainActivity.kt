@@ -40,6 +40,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CollectionsBookmark
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Explore
@@ -47,6 +48,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material.icons.filled.Whatshot
@@ -108,6 +110,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
 import java.net.HttpURLConnection
+import java.net.SocketException
 import java.net.URL
 import java.net.URLDecoder
 import java.security.MessageDigest
@@ -264,7 +267,7 @@ private val accentRed: Color
 private val starGold = Color(0xFFE0A83A)
 
 /* ============================================================================
-   SINGLE-ACTIVE DOWNLOAD QUEUE MANAGER (SAVES TO PUBLIC MOVIES/BeeGear)
+   SINGLE-ACTIVE DOWNLOAD QUEUE MANAGER (AUTO-RESUME ON ABORT + MOVIES/BeeGear)
    ============================================================================ */
 private enum class DownloadStatus {
     QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED
@@ -287,6 +290,7 @@ private object DownloadQueueManager {
     private var activeJob: Job? = null
     private var activeTaskId: String? = null
     private var loaded = false
+    private var appRef: Context? = null
 
     private fun stateFile(context: Context): File {
         val dir = File(context.filesDir, "beegear_data").apply { if (!exists()) mkdirs() }
@@ -299,6 +303,7 @@ private object DownloadQueueManager {
     }
 
     fun ensureLoaded(context: Context) {
+        appRef = context.applicationContext
         if (loaded) return
         synchronized(this) {
             if (loaded) return
@@ -333,6 +338,16 @@ private object DownloadQueueManager {
             }
             loaded = true
         }
+    }
+
+    fun onAppResumed(context: Context) {
+        ensureLoaded(context)
+        if (activeJob?.isActive == true) return
+        val resumeCandidate = tasks.firstOrNull {
+            it.status == DownloadStatus.QUEUED ||
+                (it.status == DownloadStatus.PAUSED && it.errorMessage.contains("abort", ignoreCase = true))
+        } ?: return
+        resumeOrStartSingle(context, resumeCandidate.id)
     }
 
     private fun persist(context: Context) {
@@ -419,28 +434,24 @@ private object DownloadQueueManager {
         }
         val current = tasks[idx]
         if (current.status == DownloadStatus.DOWNLOADING || current.status == DownloadStatus.QUEUED) {
-            tasks[idx] = current.copy(status = DownloadStatus.PAUSED)
+            tasks[idx] = current.copy(status = DownloadStatus.PAUSED, errorMessage = "")
             persist(context)
         }
         startNextIfIdle(context)
     }
 
-    /**
-     * একসাথে একটার বেশি ডাউনলোড চলবে না: এটি চালু করলে অন্য কোনো ডাউনলোড চলমান থাকলে সেটি PAUSED হয়ে যাবে।
-     */
     fun resumeOrStartSingle(context: Context, id: String) {
         ensureLoaded(context)
         val targetIdx = tasks.indexOfFirst { it.id == id }
         if (targetIdx < 0) return
 
-        // চলমান অন্য ডাউনলোড থাকলে পজ করো
         if (activeTaskId != null && activeTaskId != id) {
             val runningIdx = tasks.indexOfFirst { it.id == activeTaskId }
             activeJob?.cancel()
             activeJob = null
             activeTaskId = null
             if (runningIdx >= 0) {
-                tasks[runningIdx] = tasks[runningIdx].copy(status = DownloadStatus.PAUSED)
+                tasks[runningIdx] = tasks[runningIdx].copy(status = DownloadStatus.PAUSED, errorMessage = "")
             }
         }
 
@@ -496,12 +507,13 @@ private object DownloadQueueManager {
             val taskSnapshot = tasks.firstOrNull { it.id == id } ?: return@launch
             val partFile = tempFile(appCtx, taskSnapshot.fileName)
             var conn: HttpURLConnection? = null
+            var abortedBySystem = false
 
             try {
                 var existingBytes = if (partFile.exists()) partFile.length() else 0L
                 conn = (URL(taskSnapshot.url).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 15000
-                    readTimeout = 20000
+                    readTimeout = 25000
                     setRequestProperty("User-Agent", "Mozilla/5.0")
                     if (existingBytes > 0L) {
                         setRequestProperty("Range", "bytes=$existingBytes-")
@@ -551,7 +563,6 @@ private object DownloadQueueManager {
 
                 if (!isActive) return@launch
 
-                // ডাউনলোড শেষ হলে সরাসরি পাবলিক Movies/BeeGear ফোল্ডারে সেভ করো (Android/data তে নয়)
                 movePartFileToPublicMovies(appCtx, partFile, taskSnapshot.fileName)
 
                 updateTask(id) {
@@ -567,11 +578,30 @@ private object DownloadQueueManager {
                     Toast.makeText(appCtx, "সম্পন্ন: Movies/BeeGear/${taskSnapshot.fileName}", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
-                if (isActive) {
+                val msg = e.localizedMessage ?: "Download interrupted"
+                val isConnectionAbort = e is SocketException ||
+                    msg.contains("connection abort", ignoreCase = true) ||
+                    msg.contains("broken pipe", ignoreCase = true) ||
+                    msg.contains("reset by peer", ignoreCase = true) ||
+                    msg.contains("timed out", ignoreCase = true)
+
+                val savedBytes = if (partFile.exists()) partFile.length() else 0L
+                if (isConnectionAbort || !isActive) {
+                    abortedBySystem = true
                     updateTask(id) {
                         it.copy(
+                            downloadedBytes = maxOf(savedBytes, it.downloadedBytes),
+                            status = DownloadStatus.PAUSED,
+                            errorMessage = "Connection aborted (auto-resume ready)"
+                        )
+                    }
+                    persist(appCtx)
+                } else {
+                    updateTask(id) {
+                        it.copy(
+                            downloadedBytes = maxOf(savedBytes, it.downloadedBytes),
                             status = DownloadStatus.FAILED,
-                            errorMessage = e.localizedMessage ?: "Download failed"
+                            errorMessage = msg
                         )
                     }
                     persist(appCtx)
@@ -584,7 +614,9 @@ private object DownloadQueueManager {
                 if (activeTaskId == id) {
                     activeTaskId = null
                     activeJob = null
-                    startNextIfIdle(appCtx)
+                    if (!abortedBySystem) {
+                        startNextIfIdle(appCtx)
+                    }
                 }
             }
         }
@@ -622,7 +654,6 @@ private object DownloadQueueManager {
             }
         }
 
-        // Fallback বা Android 9 এবং নিচের ভার্সনের জন্য সরাসরি পাবলিক Movies/BeeGear
         val moviesDir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
             "BeeGear"
@@ -937,6 +968,9 @@ private fun latestFreshnessScore(entry: MediaEntry, nestedMaxModified: Long = 0L
     return if (maxDate > 0L) maxDate + yearBoost else yearBoost + positionalBoost
 }
 
+/* ============================================================================
+   RECOMMENDATIONS LOADER (DEEP SUBFOLDER / SEASON SUPPORT FOR SERIES & ANIME)
+   ============================================================================ */
 private suspend fun loadRecommendations(): List<Recommendation> = withContext(Dispatchers.IO) {
     val collected = Collections.synchronizedList(mutableListOf<Recommendation>())
     val seenUrls = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
@@ -944,13 +978,13 @@ private suspend fun loadRecommendations(): List<Recommendation> = withContext(Di
     coroutineScope {
         val jobs = categories.map { category ->
             async(Dispatchers.IO) {
-                val topLevel = scanFolder(category.url, 10000).getOrNull().orEmpty()
+                val topLevel = scanFolder(category.url, 12000).getOrNull().orEmpty()
                 val folders = topLevel.filter { it.isFolder }
                     .sortedByDescending { latestFreshnessScore(it) }
-                    .take(8)
+                    .take(10)
 
                 for (folder in folders) {
-                    val inside = scanFolder(folder.url, 10000).getOrNull().orEmpty()
+                    val inside = scanFolder(folder.url, 12000).getOrNull().orEmpty()
                     val directVideos = inside.any { it.isVideo }
                     val directPoster = inside.firstOrNull { it.isImage }?.url
                     val maxInsideDate = inside.maxOfOrNull { it.lastModifiedMs } ?: 0L
@@ -972,22 +1006,48 @@ private suspend fun loadRecommendations(): List<Recommendation> = withContext(Di
 
                     val nestedFolders = inside.filter { it.isFolder }
                         .sortedByDescending { latestFreshnessScore(it) }
-                        .take(6)
+                        .take(8)
 
                     for (child in nestedFolders) {
-                        val childItems = scanFolder(child.url, 10000).getOrNull().orEmpty()
+                        val childItems = scanFolder(child.url, 12000).getOrNull().orEmpty()
+                        val childPoster = childItems.firstOrNull { it.isImage }?.url ?: directPoster
+                        val childMaxDate = maxOf(maxInsideDate, childItems.maxOfOrNull { it.lastModifiedMs } ?: 0L)
+
                         if (childItems.any { it.isVideo }) {
-                            val childMaxDate = maxOf(maxInsideDate, childItems.maxOfOrNull { it.lastModifiedMs } ?: 0L)
                             if (seenUrls.add(child.url)) {
                                 collected.add(
                                     Recommendation(
                                         title = child.name,
                                         url = child.url,
-                                        poster = childItems.firstOrNull { it.isImage }?.url ?: directPoster,
+                                        poster = childPoster,
                                         subtitle = category.name,
                                         score = latestFreshnessScore(child, childMaxDate)
                                     )
                                 )
+                            }
+                            continue
+                        }
+
+                        val seasonFolders = childItems.filter { it.isFolder }
+                            .sortedByDescending { latestFreshnessScore(it) }
+                            .take(5)
+
+                        for (season in seasonFolders) {
+                            val seasonItems = scanFolder(season.url, 12000).getOrNull().orEmpty()
+                            if (seasonItems.any { it.isVideo }) {
+                                val seasonMaxDate = maxOf(childMaxDate, seasonItems.maxOfOrNull { it.lastModifiedMs } ?: 0L)
+                                if (seenUrls.add(child.url)) {
+                                    collected.add(
+                                        Recommendation(
+                                            title = child.name,
+                                            url = child.url,
+                                            poster = seasonItems.firstOrNull { it.isImage }?.url ?: childPoster,
+                                            subtitle = category.name,
+                                            score = latestFreshnessScore(child, seasonMaxDate)
+                                        )
+                                    )
+                                }
+                                break
                             }
                         }
                     }
@@ -999,7 +1059,7 @@ private suspend fun loadRecommendations(): List<Recommendation> = withContext(Di
 
     collected.distinctBy { it.url }
         .sortedByDescending { it.score }
-        .take(40)
+        .take(50)
 }
 
 private fun normalizeSearchText(input: String): String {
@@ -1031,10 +1091,8 @@ private suspend fun searchAllCategories(query: String): List<SearchHit> = withCo
         val tasks = categories.map { category ->
             async(Dispatchers.IO) {
                 val root = scanFolder(category.url, 12000).getOrNull().orEmpty()
-                val foldersToInspect = mutableListOf<MediaEntry>()
-
                 for (entry in root) {
-                    if (found.size >= 100) break
+                    if (found.size >= 80) break
                     if (matchesQuery(entry.name) && seen.add(entry.url)) {
                         found.add(
                             SearchHit(
@@ -1046,58 +1104,13 @@ private suspend fun searchAllCategories(query: String): List<SearchHit> = withCo
                             )
                         )
                     }
-                    if (entry.isFolder) {
-                        foldersToInspect.add(entry)
-                    }
-                }
-
-                for (folder in foldersToInspect.take(45)) {
-                    if (found.size >= 100) break
-                    val contents = scanFolder(folder.url, 10000).getOrNull().orEmpty()
-                    val folderPoster = contents.firstOrNull { it.isImage }?.url
-
-                    for (item in contents) {
-                        if (found.size >= 100) break
-                        if (matchesQuery(item.name) && seen.add(item.url)) {
-                            found.add(
-                                SearchHit(
-                                    title = item.name,
-                                    url = item.url,
-                                    poster = if (item.isImage) item.url else folderPoster,
-                                    subtitle = "${category.name} • ${folder.name}",
-                                    isVideo = item.isVideo
-                                )
-                            )
-                        }
-                    }
-
-                    val subFolders = contents.filter { it.isFolder }.take(25)
-                    for (sub in subFolders) {
-                        if (found.size >= 100) break
-                        val subItems = scanFolder(sub.url, 10000).getOrNull().orEmpty()
-                        val subPoster = subItems.firstOrNull { it.isImage }?.url ?: folderPoster
-                        for (child in subItems) {
-                            if (found.size >= 100) break
-                            if (matchesQuery(child.name) && seen.add(child.url)) {
-                                found.add(
-                                    SearchHit(
-                                        title = child.name,
-                                        url = child.url,
-                                        poster = if (child.isImage) child.url else subPoster,
-                                        subtitle = "${category.name} • ${sub.name}",
-                                        isVideo = child.isVideo
-                                    )
-                                )
-                            }
-                        }
-                    }
                 }
             }
         }
         tasks.awaitAll()
     }
 
-    found.take(100)
+    found.take(80)
 }
 
 private fun subtitleMimeType(uriOrName: String): String? {
@@ -1294,11 +1307,14 @@ fun BeeGearApp() {
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME && recommendations.isEmpty()) {
-                recommendationScope.launch {
-                    recommendationsLoading = true
-                    recommendations = loadRecommendations()
-                    recommendationsLoading = false
+            if (event == Lifecycle.Event.ON_RESUME) {
+                DownloadQueueManager.onAppResumed(appContext)
+                if (recommendations.isEmpty()) {
+                    recommendationScope.launch {
+                        recommendationsLoading = true
+                        recommendations = loadRecommendations()
+                        recommendationsLoading = false
+                    }
                 }
             }
         }
@@ -1472,7 +1488,6 @@ private fun SettingsScreen(
 
         Spacer(Modifier.height(20.dp))
 
-        // ১. থিম মোড
         Column(
             Modifier
                 .fillMaxWidth()
@@ -1528,7 +1543,6 @@ private fun SettingsScreen(
 
         Spacer(Modifier.height(14.dp))
 
-        // ২. ব্যাকগ্রাউন্ড কালার ও ম্যাচিং ফন্ট কালার
         Column(
             Modifier
                 .fillMaxWidth()
@@ -1585,7 +1599,6 @@ private fun SettingsScreen(
 
         Spacer(Modifier.height(14.dp))
 
-        // ৩. ডাউনলোড সেটিংস ও ডাউনলোড ম্যানেজার
         Column(
             Modifier
                 .fillMaxWidth()
@@ -1728,7 +1741,10 @@ private fun DownloadQueueScreen(onBack: () -> Unit) {
                                         "Downloading • ${formatBytes(task.downloadedBytes)} / ${if (task.totalBytes > 0L) formatBytes(task.totalBytes) else "..."}$pct"
                                     }
                                     DownloadStatus.QUEUED -> "Queued • অপেক্ষায় আছে"
-                                    DownloadStatus.PAUSED -> "Paused • ${formatBytes(task.downloadedBytes)}"
+                                    DownloadStatus.PAUSED -> {
+                                        val note = if (task.errorMessage.isNotBlank()) " • ${task.errorMessage}" else ""
+                                        "Paused • ${formatBytes(task.downloadedBytes)}$note"
+                                    }
                                     DownloadStatus.COMPLETED -> "Completed • Movies/BeeGear"
                                     DownloadStatus.FAILED -> "Failed • ${task.errorMessage}"
                                 }
@@ -2225,7 +2241,7 @@ private fun GlassCategorySection(
 }
 
 /* ============================================================================
-   2. DETAILS & FOLDER SCREEN
+   2. DETAILS & FOLDER SCREEN (WITH IN-FOLDER TITLE SEARCH)
    ============================================================================ */
 @Composable
 private fun MediaDetailsScreen(
@@ -2242,10 +2258,18 @@ private fun MediaDetailsScreen(
     onVideo: (MediaEntry) -> Unit,
     onDownloadVideo: (MediaEntry) -> Unit
 ) {
-    val folders = remember(entries) { entries.filter { it.isFolder } }
+    var folderSearchOpen by remember(title) { mutableStateOf(false) }
+    var folderTitleQuery by remember(title) { mutableStateOf("") }
+
+    val normalizedQuery = remember(folderTitleQuery) { normalizeSearchText(folderTitleQuery) }
+    val filteredFolders = remember(entries, normalizedQuery) {
+        val baseFolders = entries.filter { it.isFolder }
+        if (normalizedQuery.isBlank()) baseFolders
+        else baseFolders.filter { normalizeSearchText(it.name).contains(normalizedQuery) }
+    }
     val videos = remember(entries) { entries.filter { it.isVideo } }
     val firstVideo = videos.firstOrNull()
-    val folderRows = remember(folders) { folders.chunked(2) }
+    val folderRows = remember(filteredFolders) { filteredFolders.chunked(2) }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(bgDark),
@@ -2278,20 +2302,40 @@ private fun MediaDetailsScreen(
                         Text("B", color = Color.White, fontWeight = FontWeight.Black, fontSize = 16.sp)
                     }
                     Spacer(Modifier.weight(1f))
-                    Box(
-                        Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(Color.Black.copy(alpha = 0.5f))
-                            .clickable { onOpenDownloads() },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Download,
-                            contentDescription = "Downloads",
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(
+                            Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(if (folderSearchOpen) accentRed else Color.Black.copy(alpha = 0.5f))
+                                .clickable {
+                                    folderSearchOpen = !folderSearchOpen
+                                    if (!folderSearchOpen) folderTitleQuery = ""
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Search,
+                                contentDescription = "Search Title in Folder",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Box(
+                            Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(Color.Black.copy(alpha = 0.5f))
+                                .clickable { onOpenDownloads() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Download,
+                                contentDescription = "Downloads",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
 
@@ -2311,6 +2355,7 @@ private fun MediaDetailsScreen(
         }
 
         item {
+            val totalFolderCount = entries.count { it.isFolder }
             Column(
                 Modifier
                     .fillMaxWidth()
@@ -2330,7 +2375,7 @@ private fun MediaDetailsScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    text = if (videos.isNotEmpty()) "${videos.size} Video File(s) • ${folders.size} Folder(s)" else "${folders.size} Folder(s) Available",
+                    text = if (videos.isNotEmpty()) "${videos.size} Video File(s) • $totalFolderCount Folder(s)" else "$totalFolderCount Folder(s) Available",
                     color = textMuted,
                     fontSize = 12.sp,
                     textAlign = TextAlign.Center,
@@ -2353,7 +2398,53 @@ private fun MediaDetailsScreen(
                         Text(if (isFavorite) "♥" else "♡", color = if (isFavorite) accentRed else primaryText, fontSize = 16.sp)
                     }
                 }
-                Spacer(Modifier.height(20.dp))
+
+                if (folderSearchOpen) {
+                    Spacer(Modifier.height(14.dp))
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(cardDark)
+                            .border(1.dp, accentRed.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Search,
+                            contentDescription = null,
+                            tint = accentRed,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        BasicTextField(
+                            value = folderTitleQuery,
+                            onValueChange = { folderTitleQuery = it },
+                            singleLine = true,
+                            textStyle = TextStyle(color = primaryText, fontSize = 14.sp),
+                            modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+                            decorationBox = { inner ->
+                                Box {
+                                    if (folderTitleQuery.isEmpty()) {
+                                        Text("শুধু এই ফোল্ডারের টাইটেল খুঁজুন...", color = textMuted, fontSize = 13.sp)
+                                    }
+                                    inner()
+                                }
+                            }
+                        )
+                        if (folderTitleQuery.isNotEmpty()) {
+                            Icon(
+                                imageVector = Icons.Filled.Close,
+                                contentDescription = "Clear",
+                                tint = textMuted,
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .clickable { folderTitleQuery = "" }
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(18.dp))
                 Text("Story Line", color = primaryText, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
                 Text(
@@ -2370,13 +2461,18 @@ private fun MediaDetailsScreen(
                     }
                 } else if (error.isNotBlank()) {
                     Text("Server error: $error", color = Color(0xFFFF7777), fontSize = 13.sp)
-                } else if (folders.isEmpty() && videos.isEmpty()) {
-                    Text("এই ফোল্ডারে কোনো কনটেন্ট পাওয়া যায়নি।", color = textMuted, fontSize = 13.sp)
+                } else if (filteredFolders.isEmpty() && videos.isEmpty()) {
+                    Text(
+                        if (normalizedQuery.isNotBlank()) "\"$folderTitleQuery\" নামে এই ফোল্ডারে কোনো টাইটেল পাওয়া যায়নি।"
+                        else "এই ফোল্ডারে কোনো কনটেন্ট পাওয়া যায়নি।",
+                        color = textMuted,
+                        fontSize = 13.sp
+                    )
                 }
             }
         }
 
-        if (!loading && error.isBlank() && videos.isNotEmpty()) {
+        if (!loading && error.isBlank() && videos.isNotEmpty() && normalizedQuery.isBlank()) {
             item {
                 Text(
                     "Playable Files (${videos.size})",
@@ -2471,10 +2567,11 @@ private fun MediaDetailsScreen(
             }
         }
 
-        if (!loading && error.isBlank() && folders.isNotEmpty()) {
+        if (!loading && error.isBlank() && filteredFolders.isNotEmpty()) {
             item {
                 Text(
-                    "Folders & Seasons (${folders.size})",
+                    if (normalizedQuery.isNotBlank()) "Matching Titles (${filteredFolders.size})"
+                    else "Folders & Seasons (${filteredFolders.size})",
                     color = primaryText,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
@@ -2569,7 +2666,7 @@ private fun SearchScreen(onOpenFolder: (SearchHit) -> Unit, onPlayVideo: (Search
                 modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
                 decorationBox = { inner ->
                     Box {
-                        if (query.isEmpty()) Text("Search all ISP movies and series", color = textMuted, fontSize = 13.sp)
+                        if (query.isEmpty()) Text("Search ISP categories and titles", color = textMuted, fontSize = 13.sp)
                         inner()
                     }
                 }
@@ -2601,9 +2698,9 @@ private fun SearchScreen(onOpenFolder: (SearchHit) -> Unit, onPlayVideo: (Search
         } else if (error.isNotBlank()) {
             Text(error, color = Color(0xFFFF7777), modifier = Modifier.padding(12.dp))
         } else if (searched && results.isEmpty()) {
-            Text("No matching content found in the configured ISP folders.", color = textMuted, fontSize = 13.sp, modifier = Modifier.padding(top = 20.dp))
+            Text("No matching title found in the configured ISP folders.", color = textMuted, fontSize = 13.sp, modifier = Modifier.padding(top = 20.dp))
         } else if (!searched) {
-            Text("Search checks the configured ISP categories, including nested folders.", color = textMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 18.dp))
+            Text("Tip: যেকোনো ফোল্ডারের ভেতরে ঢুকে ওপরের সার্চ আইকন থেকে শুধু সেই ফোল্ডারের টাইটেলও খুঁজতে পারবেন।", color = textMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 18.dp))
         } else {
             Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(top = 12.dp)) {
                 Text("${results.size} result(s)", color = textMuted, fontSize = 12.sp, modifier = Modifier.padding(bottom = 8.dp))
@@ -2741,7 +2838,7 @@ private fun TrendingOrSavedScreen(
 }
 
 /* ============================================================================
-   4. FLOATING PILL BOTTOM NAVIGATION BAR (GLASS UI PRESERVED)
+   4. FLOATING PILL BOTTOM NAVIGATION BAR (DYNAMIC THEME & PALETTE SYNC)
    ============================================================================ */
 @Composable
 private fun FloatingBottomNav(tab: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
@@ -2753,15 +2850,35 @@ private fun FloatingBottomNav(tab: String, onSelect: (String) -> Unit, modifier:
         "FAVORITES" to "layers-3"
     )
     val selectedIndex = navItems.indexOfFirst { it.first == tab }.coerceAtLeast(0)
-    val iconColor = if (appDarkMode) Color.White else Color(0xFF171717)
+    val isDark = appDarkMode
+    val barBg = if (isDark) cardDark.copy(alpha = 0.88f) else cardDark.copy(alpha = 0.92f)
+    val borderTint = if (isDark) accentRed.copy(alpha = 0.35f) else primaryText.copy(alpha = 0.14f)
+    val activePillBrush = if (isDark) {
+        Brush.linearGradient(
+            listOf(
+                accentRed.copy(alpha = 0.32f),
+                primaryText.copy(alpha = 0.14f),
+                accentRed.copy(alpha = 0.18f)
+            )
+        )
+    } else {
+        Brush.linearGradient(
+            listOf(
+                bgDark.copy(alpha = 0.96f),
+                accentRed.copy(alpha = 0.16f),
+                bgDark.copy(alpha = 0.82f)
+            )
+        )
+    }
+    val activePillBorder = accentRed.copy(alpha = if (isDark) 0.55f else 0.42f)
 
     BoxWithConstraints(
         modifier
             .fillMaxWidth()
             .height(76.dp)
             .clip(RoundedCornerShape(40.dp))
-            .background(if (appDarkMode) Color(0xCC182333) else Color(0xCCF5F8FC))
-            .border(1.dp, Color.White.copy(alpha = if (appDarkMode) .38f else .78f), RoundedCornerShape(40.dp))
+            .background(barBg)
+            .border(1.dp, borderTint, RoundedCornerShape(40.dp))
     ) {
         val itemWidth = maxWidth / navItems.size
         val pillWidth = itemWidth * 0.90f
@@ -2776,13 +2893,8 @@ private fun FloatingBottomNav(tab: String, onSelect: (String) -> Unit, modifier:
                 .width(pillWidth)
                 .height(66.dp)
                 .clip(RoundedCornerShape(36.dp))
-                .background(
-                    Brush.linearGradient(
-                        if (appDarkMode) listOf(Color.White.copy(.27f), Color.White.copy(.10f), Color(0xFF9CB9E8).copy(.16f))
-                        else listOf(Color.White.copy(.94f), Color.White.copy(.56f), Color(0xFFD9E8F8).copy(.48f))
-                    )
-                )
-                .border(1.dp, Color.White.copy(alpha = .78f), RoundedCornerShape(36.dp))
+                .background(activePillBrush)
+                .border(1.dp, activePillBorder, RoundedCornerShape(36.dp))
         )
         Row(Modifier.fillMaxSize().padding(horizontal = 3.dp), verticalAlignment = Alignment.CenterVertically) {
             navItems.forEachIndexed { index, item ->
@@ -2797,7 +2909,7 @@ private fun FloatingBottomNav(tab: String, onSelect: (String) -> Unit, modifier:
                             else -> Icons.Filled.CollectionsBookmark
                         },
                         contentDescription = item.first,
-                        tint = iconColor.copy(alpha = if (selected) 1f else .82f),
+                        tint = if (selected) accentRed else primaryText.copy(alpha = 0.78f),
                         modifier = Modifier.size(if (selected) 34.dp else 31.dp)
                     )
                 }
