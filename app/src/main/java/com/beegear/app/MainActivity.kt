@@ -1,6 +1,7 @@
 package com.beegear.app
 
 import android.app.Activity
+import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -9,7 +10,9 @@ import android.graphics.BitmapFactory
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.view.View
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -35,6 +38,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CollectionsBookmark
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.TravelExplore
@@ -75,6 +79,9 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
@@ -88,13 +95,25 @@ import java.io.FileOutputStream
 import java.net.URL
 import java.net.URLDecoder
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Collections
+import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 
 data class Category(val name: String, val url: String)
-data class MediaEntry(val name: String, val url: String, val isFolder: Boolean, val isVideo: Boolean, val isImage: Boolean)
+data class MediaEntry(
+    val name: String,
+    val url: String,
+    val isFolder: Boolean,
+    val isVideo: Boolean,
+    val isImage: Boolean,
+    val lastModifiedMs: Long = 0L,
+    val sourceOrder: Int = 0
+)
 data class FolderLocation(val title: String, val url: String, val poster: String? = null)
-data class Recommendation(val title: String, val url: String, val poster: String?, val subtitle: String)
+data class Recommendation(val title: String, val url: String, val poster: String?, val subtitle: String, val score: Long = 0L)
 data class SearchHit(val title: String, val url: String, val poster: String?, val subtitle: String, val isVideo: Boolean)
 
 /* ============================================================================
@@ -234,6 +253,45 @@ private object InternalStorageStore {
     }
 }
 
+/* ============================================================================
+   DIRECT PUBLIC MOVIES FOLDER DOWNLOAD HELPER (/storage/emulated/0/Movies/BeeGear)
+   ============================================================================ */
+private fun downloadVideoToPublicMovies(context: Context, video: MediaEntry) {
+    try {
+        val rawName = try {
+            URLDecoder.decode(video.name.ifBlank { URI_FILENAME_FALLBACK(video.url) }, "UTF-8")
+        } catch (_: Exception) {
+            video.name.ifBlank { URI_FILENAME_FALLBACK(video.url) }
+        }
+        val cleanName = rawName
+            .replace(Regex("[\\\\/:*?\"<>|]+"), "_")
+            .trim()
+            .ifBlank { "beegear_video.mp4" }
+
+        val request = DownloadManager.Request(Uri.parse(video.url))
+            .setTitle(cleanName)
+            .setDescription("Downloading from BeeGear ISP Server")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .setAllowedOverMetered(true)
+            .setAllowedOverRoaming(true)
+            .setDestinationInExternalPublicDir(Environment.DIRECTORY_MOVIES, "BeeGear/$cleanName")
+
+        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        dm.enqueue(request)
+        Toast.makeText(context, "Movies/BeeGear ফোল্ডারে ডাউনলোড শুরু হয়েছে: $cleanName", Toast.LENGTH_SHORT).show()
+    } catch (e: Exception) {
+        Toast.makeText(context, "ডাউনলোড শুরু করা যায়নি: ${e.localizedMessage ?: "Error"}", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun URI_FILENAME_FALLBACK(url: String): String {
+    return try {
+        URL(url).path.substringAfterLast("/").ifBlank { "video.mp4" }
+    } catch (_: Exception) {
+        "video.mp4"
+    }
+}
+
 private fun readRecommendationList(raw: String?): List<Recommendation> {
     if (raw.isNullOrBlank()) return emptyList()
     return try {
@@ -244,7 +302,8 @@ private fun readRecommendationList(raw: String?): List<Recommendation> {
                 item.optString("title"),
                 item.optString("url"),
                 item.optString("poster").ifBlank { null },
-                item.optString("subtitle")
+                item.optString("subtitle"),
+                item.optLong("score", 0L)
             )
         }
     } catch (_: Exception) {
@@ -276,10 +335,49 @@ private val starGold = Color(0xFFE0A83A)
 private val videoExtensions = listOf(".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".ts")
 private val imageExtensions = listOf(".jpg", ".jpeg", ".png", ".webp", ".bmp")
 
+private val datePatterns = listOf(
+    "yyyy-MM-dd HH:mm",
+    "yyyy-MM-dd",
+    "dd-MMM-yyyy HH:mm",
+    "dd-MMM-yyyy",
+    "dd/MMM/yyyy HH:mm",
+    "MM/dd/yyyy hh:mm:ss a",
+    "MM/dd/yyyy HH:mm:ss",
+    "MM/dd/yyyy"
+)
+
+private fun parseDateToMillis(rawText: String): Long {
+    val match = Regex(
+        "(\\d{4}-\\d{2}-\\d{2}(?:\\s+\\d{2}:\\d{2})?|\\d{2}-[A-Za-z]{3}-\\d{4}(?:\\s+\\d{2}:\\d{2})?|\\d{2}/[A-Za-z]{3}/\\d{4}(?:\\s+\\d{2}:\\d{2})?|\\d{2}/\\d{2}/\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\s*[APap][Mm])?)?)"
+    ).find(rawText)?.value ?: return 0L
+
+    for (pattern in datePatterns) {
+        try {
+            val sdf = SimpleDateFormat(pattern, Locale.ENGLISH).apply {
+                timeZone = TimeZone.getDefault()
+            }
+            val parsed = sdf.parse(match.trim())
+            if (parsed != null) return parsed.time
+        } catch (_: Exception) {
+        }
+    }
+    return 0L
+}
+
+private fun yearPriorityBoost(name: String): Long {
+    val decoded = try { URLDecoder.decode(name, "UTF-8") } catch (_: Exception) { name }
+    val years = Regex("\\b(19\\d{2}|20\\d{2})\\b").findAll(decoded)
+        .mapNotNull { it.value.toIntOrNull() }
+        .filter { it in 1990..2030 }
+        .maxOrNull() ?: return 0L
+    return (years - 1990).toLong() * 86_400_000L * 365L
+}
+
 private suspend fun scanFolder(url: String, timeoutMs: Int = 12000): Result<List<MediaEntry>> = withContext(Dispatchers.IO) {
     try {
         val doc = Jsoup.connect(url).userAgent("Mozilla/5.0").timeout(timeoutMs).ignoreContentType(true).get()
         val host = URL(url).host
+        var seq = 0
         val items = doc.select("a[href]").mapNotNull { link ->
             val href = link.attr("href").trim()
             if (href.isBlank() || href.startsWith("#") || href.startsWith("?") ||
@@ -301,7 +399,18 @@ private suspend fun scanFolder(url: String, timeoutMs: Int = 12000): Result<List
                     parsed.path.trimEnd('/').substringAfterLast("/")
                 }
             }
-            MediaEntry(name, address, isFolder, isVideo, isImage)
+            val rowText = link.parent()?.text() ?: ""
+            val modifiedMs = parseDateToMillis(rowText)
+            val order = seq++
+            MediaEntry(
+                name = name,
+                url = address,
+                isFolder = isFolder,
+                isVideo = isVideo,
+                isImage = isImage,
+                lastModifiedMs = modifiedMs,
+                sourceOrder = order
+            )
         }.distinctBy { it.url }
             .sortedWith(compareByDescending<MediaEntry> { it.isFolder }.thenBy { it.name.lowercase() })
         Result.success(items)
@@ -325,94 +434,175 @@ private suspend fun findPosterDeep(folderUrl: String): String? = withContext(Dis
     level3.firstOrNull { it.isImage }?.url
 }
 
-private suspend fun loadRecommendations(): List<Recommendation> {
-    val output = mutableListOf<Recommendation>()
-    val seenUrls = mutableSetOf<String>()
-
-    for (category in categories.shuffled()) {
-        if (output.size >= 36) break
-
-        val categoryItems = mutableListOf<Recommendation>()
-        val topLevel = scanFolder(category.url, 10000).getOrNull().orEmpty()
-        val folders = topLevel.filter { it.isFolder }.shuffled().take(6)
-
-        for (folder in folders) {
-            if (categoryItems.size >= 4) break
-
-            val inside = scanFolder(folder.url, 10000).getOrNull().orEmpty()
-            val directVideos = inside.any { it.isVideo }
-            val directPoster = inside.firstOrNull { it.isImage }?.url
-
-            if (directVideos) {
-                if (seenUrls.add(folder.url)) {
-                    categoryItems.add(
-                        Recommendation(folder.name, folder.url, directPoster, category.name)
-                    )
-                }
-                continue
-            }
-
-            val nestedFolders = inside.filter { it.isFolder }.shuffled().take(4)
-            for (child in nestedFolders) {
-                if (categoryItems.size >= 4) break
-                val childItems = scanFolder(child.url, 10000).getOrNull().orEmpty()
-                if (childItems.any { it.isVideo }) {
-                    if (seenUrls.add(child.url)) {
-                        categoryItems.add(
-                            Recommendation(
-                                child.name,
-                                child.url,
-                                childItems.firstOrNull { it.isImage }?.url ?: directPoster,
-                                category.name
-                            )
-                        )
-                    }
-                }
-            }
-        }
-
-        output.addAll(categoryItems.shuffled())
-    }
-
-    return output.distinctBy { it.url }.shuffled()
+private fun latestFreshnessScore(entry: MediaEntry, nestedMaxModified: Long = 0L): Long {
+    val maxDate = maxOf(entry.lastModifiedMs, nestedMaxModified)
+    val yearBoost = yearPriorityBoost(entry.name)
+    // সার্ভার লিস্টিংয়ে তারিখ না থাকলে শেষের দিকের (নতুন যুক্ত হওয়া) আইটেমকে সামান্য বেশি গুরুত্ব দেওয়া হবে
+    val positionalBoost = entry.sourceOrder.toLong() * 1_000L
+    return if (maxDate > 0L) maxDate + yearBoost else yearBoost + positionalBoost
 }
 
-private suspend fun searchAllCategories(query: String): List<SearchHit> = withContext(Dispatchers.IO) {
-    val needle = query.trim().lowercase()
-    if (needle.isBlank()) return@withContext emptyList()
-    val found = mutableListOf<SearchHit>()
-    val seen = mutableSetOf<String>()
-    for (category in categories) {
-        val root = scanFolder(category.url, 10000).getOrNull().orEmpty()
-        for (entry in root.filter { it.isFolder || it.isVideo }.take(12)) {
-            if (entry.isFolder) {
-                val contents = scanFolder(entry.url, 10000).getOrNull().orEmpty()
-                val poster = contents.firstOrNull { it.isImage }?.url
-                if (entry.name.lowercase().contains(needle) && contents.any { it.isVideo } && seen.add(entry.url)) {
-                    found.add(SearchHit(entry.name, entry.url, poster, category.name, false))
-                }
-                for (child in contents.filter { it.isFolder }.take(8)) {
-                    val childItems = scanFolder(child.url, 10000).getOrNull().orEmpty()
-                    if (child.name.lowercase().contains(needle) && childItems.any { it.isVideo } && seen.add(child.url)) {
-                        found.add(SearchHit(child.name, child.url, childItems.firstOrNull { it.isImage }?.url ?: poster, category.name, false))
+private suspend fun loadRecommendations(): List<Recommendation> = withContext(Dispatchers.IO) {
+    val collected = Collections.synchronizedList(mutableListOf<Recommendation>())
+    val seenUrls = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
+    coroutineScope {
+        val jobs = categories.map { category ->
+            async(Dispatchers.IO) {
+                val topLevel = scanFolder(category.url, 10000).getOrNull().orEmpty()
+                val folders = topLevel.filter { it.isFolder }
+                    .sortedByDescending { latestFreshnessScore(it) }
+                    .take(8)
+
+                for (folder in folders) {
+                    val inside = scanFolder(folder.url, 10000).getOrNull().orEmpty()
+                    val directVideos = inside.any { it.isVideo }
+                    val directPoster = inside.firstOrNull { it.isImage }?.url
+                    val maxInsideDate = inside.maxOfOrNull { it.lastModifiedMs } ?: 0L
+
+                    if (directVideos) {
+                        if (seenUrls.add(folder.url)) {
+                            collected.add(
+                                Recommendation(
+                                    title = folder.name,
+                                    url = folder.url,
+                                    poster = directPoster,
+                                    subtitle = category.name,
+                                    score = latestFreshnessScore(folder, maxInsideDate)
+                                )
+                            )
+                        }
+                        continue
                     }
-                    for (video in childItems.filter { it.isVideo }) {
-                        if (video.name.lowercase().contains(needle) && seen.add(video.url)) {
-                            found.add(SearchHit(video.name, video.url, null, category.name, true))
+
+                    val nestedFolders = inside.filter { it.isFolder }
+                        .sortedByDescending { latestFreshnessScore(it) }
+                        .take(6)
+
+                    for (child in nestedFolders) {
+                        val childItems = scanFolder(child.url, 10000).getOrNull().orEmpty()
+                        if (childItems.any { it.isVideo }) {
+                            val childMaxDate = maxOf(maxInsideDate, childItems.maxOfOrNull { it.lastModifiedMs } ?: 0L)
+                            if (seenUrls.add(child.url)) {
+                                collected.add(
+                                    Recommendation(
+                                        title = child.name,
+                                        url = child.url,
+                                        poster = childItems.firstOrNull { it.isImage }?.url ?: directPoster,
+                                        subtitle = category.name,
+                                        score = latestFreshnessScore(child, childMaxDate)
+                                    )
+                                )
+                            }
                         }
                     }
                 }
-                for (video in contents.filter { it.isVideo }) {
-                    if (video.name.lowercase().contains(needle) && seen.add(video.url)) {
-                        found.add(SearchHit(video.name, video.url, poster, category.name, true))
-                    }
-                }
-            } else if (entry.isVideo && entry.name.lowercase().contains(needle) && seen.add(entry.url)) {
-                found.add(SearchHit(entry.name, entry.url, null, category.name, true))
             }
         }
+        jobs.awaitAll()
     }
-    found.take(80)
+
+    collected.distinctBy { it.url }
+        .sortedByDescending { it.score }
+        .take(40)
+}
+
+private fun normalizeSearchText(input: String): String {
+    return try {
+        URLDecoder.decode(input, "UTF-8")
+    } catch (_: Exception) {
+        input
+    }.lowercase()
+        .replace(Regex("[._\\-()+\\[\\]]+"), " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+}
+
+private suspend fun searchAllCategories(query: String): List<SearchHit> = withContext(Dispatchers.IO) {
+    val normalizedQuery = normalizeSearchText(query)
+    if (normalizedQuery.isBlank()) return@withContext emptyList()
+
+    val tokens = normalizedQuery.split(" ").filter { it.isNotBlank() }
+    val found = Collections.synchronizedList(mutableListOf<SearchHit>())
+    val seen = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
+    fun matchesQuery(rawName: String): Boolean {
+        val target = normalizeSearchText(rawName)
+        if (target.contains(normalizedQuery)) return true
+        return tokens.size > 1 && tokens.all { token -> target.contains(token) }
+    }
+
+    coroutineScope {
+        val tasks = categories.map { category ->
+            async(Dispatchers.IO) {
+                val root = scanFolder(category.url, 12000).getOrNull().orEmpty()
+                val foldersToInspect = mutableListOf<MediaEntry>()
+
+                for (entry in root) {
+                    if (found.size >= 100) break
+                    if (matchesQuery(entry.name) && seen.add(entry.url)) {
+                        found.add(
+                            SearchHit(
+                                title = entry.name,
+                                url = entry.url,
+                                poster = null,
+                                subtitle = category.name,
+                                isVideo = entry.isVideo
+                            )
+                        )
+                    }
+                    if (entry.isFolder) {
+                        foldersToInspect.add(entry)
+                    }
+                }
+
+                for (folder in foldersToInspect.take(45)) {
+                    if (found.size >= 100) break
+                    val contents = scanFolder(folder.url, 10000).getOrNull().orEmpty()
+                    val folderPoster = contents.firstOrNull { it.isImage }?.url
+
+                    for (item in contents) {
+                        if (found.size >= 100) break
+                        if (matchesQuery(item.name) && seen.add(item.url)) {
+                            found.add(
+                                SearchHit(
+                                    title = item.name,
+                                    url = item.url,
+                                    poster = if (item.isImage) item.url else folderPoster,
+                                    subtitle = "${category.name} • ${folder.name}",
+                                    isVideo = item.isVideo
+                                )
+                            )
+                        }
+                    }
+
+                    val subFolders = contents.filter { it.isFolder }.take(25)
+                    for (sub in subFolders) {
+                        if (found.size >= 100) break
+                        val subItems = scanFolder(sub.url, 10000).getOrNull().orEmpty()
+                        val subPoster = subItems.firstOrNull { it.isImage }?.url ?: folderPoster
+                        for (child in subItems) {
+                            if (found.size >= 100) break
+                            if (matchesQuery(child.name) && seen.add(child.url)) {
+                                found.add(
+                                    SearchHit(
+                                        title = child.name,
+                                        url = child.url,
+                                        poster = if (child.isImage) child.url else subPoster,
+                                        subtitle = "${category.name} • ${sub.name}",
+                                        isVideo = child.isVideo
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        tasks.awaitAll()
+    }
+
+    found.take(100)
 }
 
 private fun subtitleMimeType(uriOrName: String): String? {
@@ -524,6 +714,7 @@ fun BeeGearApp() {
             array.put(
                 JSONObject().put("title", item.title).put("url", item.url)
                     .put("poster", item.poster ?: "").put("subtitle", item.subtitle)
+                    .put("score", item.score)
             )
         }
         appContext.getSharedPreferences("beegear_settings", Context.MODE_PRIVATE)
@@ -536,6 +727,7 @@ fun BeeGearApp() {
             array.put(
                 JSONObject().put("title", item.title).put("url", item.url)
                     .put("poster", item.poster ?: "").put("subtitle", item.subtitle)
+                    .put("score", item.score)
             )
         }
         appContext.getSharedPreferences("beegear_settings", Context.MODE_PRIVATE)
@@ -640,6 +832,9 @@ fun BeeGearApp() {
                         .distinctBy { it.url }.take(12)
                     playingTitle = video.name
                     playingUrl = video.url
+                },
+                onDownloadVideo = { video ->
+                    downloadVideoToPublicMovies(appContext, video)
                 }
             )
 
@@ -656,8 +851,8 @@ fun BeeGearApp() {
             tab == "BROWSE" -> BrowseScreen(onCategory = { stack = emptyList(); openFolder(it.name, it.url) })
 
             tab == "TRENDING" -> TrendingOrSavedScreen(
-                screenTitle = "Trending Now",
-                items = recommendations.asReversed(),
+                screenTitle = "Latest Updates",
+                items = recommendations,
                 onOpen = { stack = emptyList(); openFolder(it.title, it.url, it.poster) }
             )
 
@@ -808,7 +1003,7 @@ private fun HomeScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("Featured for You", color = primaryText, fontSize = 19.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            Text("7–8 picks", color = textMuted, fontSize = 11.sp)
+            Text("Latest updates", color = textMuted, fontSize = 11.sp)
         }
 
         if (featured.isEmpty()) {
@@ -839,7 +1034,7 @@ private fun HomeScreen(
                         )
                         Column(Modifier.align(Alignment.BottomStart).padding(17.dp)) {
                             Text(
-                                "FEATURED • ${item.subtitle.uppercase()}",
+                                "NEW • ${item.subtitle.uppercase()}",
                                 color = Color.White.copy(alpha = .82f),
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.Bold,
@@ -946,7 +1141,7 @@ private fun HomeScreen(
         }
 
         GlassCategorySection(
-            title = "Popular Movies",
+            title = "Latest Movies",
             items = recommendations.filter { !it.subtitle.contains("Series", true) }.ifEmpty { recommendations },
             onSeeAll = onSeeAll,
             onOpen = onOpen
@@ -963,13 +1158,13 @@ private fun HomeScreen(
                 onSeeAll = { onCategory(category) },
                 onOpen = onOpen,
                 emptyLoading = loading && recommendations.isEmpty(),
-                emptyText = if (loading) "Loading from ISP server..." else "Open to browse this category"
+                emptyText = if (loading) "Loading latest updates from ISP server..." else "Open to browse this category"
             )
         }
 
         GlassCategorySection(
-            title = "New Episodes",
-            items = recommendations.filter { it.subtitle.contains("Series", true) }.ifEmpty { recommendations.asReversed() },
+            title = "Latest Series & Episodes",
+            items = recommendations.filter { it.subtitle.contains("Series", true) }.ifEmpty { recommendations },
             onSeeAll = onSeeAll,
             onOpen = onOpen
         )
@@ -1046,7 +1241,7 @@ private fun GlassCategorySection(
 }
 
 /* ============================================================================
-   2. DETAILS & FOLDER SCREEN
+   2. DETAILS & FOLDER SCREEN (WITH DIRECT DOWNLOAD TO MOVIES FOLDER)
    ============================================================================ */
 @Composable
 private fun MediaDetailsScreen(
@@ -1059,7 +1254,8 @@ private fun MediaDetailsScreen(
     onToggleFavorite: () -> Unit,
     onBack: () -> Unit,
     onFolder: (MediaEntry) -> Unit,
-    onVideo: (MediaEntry) -> Unit
+    onVideo: (MediaEntry) -> Unit,
+    onDownloadVideo: (MediaEntry) -> Unit
 ) {
     val folders = remember(entries) { entries.filter { it.isFolder } }
     val videos = remember(entries) { entries.filter { it.isVideo } }
@@ -1162,7 +1358,7 @@ private fun MediaDetailsScreen(
                 Text("Story Line", color = primaryText, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "Streaming directly from your local ISP media server ($title). Tap any folder or video file below to open.",
+                    text = "Streaming directly from your local ISP media server ($title). Tap any video to play or download directly to Movies/BeeGear.",
                     color = textMuted,
                     fontSize = 12.sp,
                     lineHeight = 18.sp
@@ -1192,29 +1388,72 @@ private fun MediaDetailsScreen(
                 )
             }
             items(videos, key = { it.url }) { video ->
-                Row(
+                Column(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 22.dp, vertical = 5.dp)
-                        .clip(RoundedCornerShape(14.dp))
+                        .padding(horizontal = 22.dp, vertical = 6.dp)
+                        .clip(RoundedCornerShape(16.dp))
                         .background(cardDark)
-                        .clickable { onVideo(video) }
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(14.dp)
                 ) {
-                    Box(Modifier.size(34.dp).clip(CircleShape).background(accentRed), contentAlignment = Alignment.Center) {
-                        Text("▶", color = primaryText, fontSize = 12.sp)
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onVideo(video) },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(Modifier.size(34.dp).clip(CircleShape).background(accentRed), contentAlignment = Alignment.Center) {
+                            Text("▶", color = Color.White, fontSize = 12.sp)
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            video.name,
+                            color = primaryText,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
                     }
-                    Spacer(Modifier.width(12.dp))
-                    Text(
-                        video.name,
-                        color = primaryText,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(accentRed)
+                                .clickable { onVideo(video) }
+                                .padding(vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("▶ Play Now", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(tagDark)
+                                .border(1.dp, accentRed.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+                                .clickable { onDownloadVideo(video) }
+                                .padding(vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Filled.Download,
+                                    contentDescription = "Download",
+                                    tint = primaryText,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text("Download", color = primaryText, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
                 }
             }
         }
