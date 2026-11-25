@@ -1,16 +1,19 @@
 package com.beegear.app
 
 import android.app.Activity
-import android.app.DownloadManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioManager
+import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.MediaStore
 import android.view.View
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -40,13 +43,20 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CollectionsBookmark
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Explore
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material.icons.filled.Whatshot
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
@@ -78,11 +88,15 @@ import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -92,6 +106,8 @@ import org.json.JSONObject
 import org.jsoup.Jsoup
 import java.io.File
 import java.io.FileOutputStream
+import java.io.OutputStream
+import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLDecoder
 import java.security.MessageDigest
@@ -115,6 +131,534 @@ data class MediaEntry(
 data class FolderLocation(val title: String, val url: String, val poster: String? = null)
 data class Recommendation(val title: String, val url: String, val poster: String?, val subtitle: String, val score: Long = 0L)
 data class SearchHit(val title: String, val url: String, val poster: String?, val subtitle: String, val isVideo: Boolean)
+
+/* ============================================================================
+   THEME & BACKGROUND COLOR PALETTES (GLASS UI PRESERVED + MATCHING FONT COLORS)
+   ============================================================================ */
+private data class BgPalette(
+    val id: String,
+    val label: String,
+    val swatchColor: Color,
+    val lightBg: Color,
+    val lightCard: Color,
+    val lightTag: Color,
+    val lightPrimaryText: Color,
+    val lightMutedText: Color,
+    val lightAccent: Color,
+    val darkBg: Color,
+    val darkCard: Color,
+    val darkTag: Color,
+    val darkPrimaryText: Color,
+    val darkMutedText: Color,
+    val darkAccent: Color
+)
+
+private val bgPalettes = listOf(
+    BgPalette(
+        id = "cool_blue",
+        label = "Cool Blue",
+        swatchColor = Color(0xFF6579E8),
+        lightBg = Color(0xFFF5F7FC),
+        lightCard = Color(0xFFE8EDF7),
+        lightTag = Color(0xFFE8EDFA),
+        lightPrimaryText = Color(0xFF263B62),
+        lightMutedText = Color(0xFF718097),
+        lightAccent = Color(0xFF6579E8),
+        darkBg = Color(0xFF11131B),
+        darkCard = Color(0xFF222633),
+        darkTag = Color(0xFF30384B),
+        darkPrimaryText = Color(0xFFF4F6FC),
+        darkMutedText = Color(0xFFADB7CA),
+        darkAccent = Color(0xFF7A8DF5)
+    ),
+    BgPalette(
+        id = "indigo_mist",
+        label = "Indigo Mist",
+        swatchColor = Color(0xFF7E69E8),
+        lightBg = Color(0xFFF6F4FC),
+        lightCard = Color(0xFFEBE7F8),
+        lightTag = Color(0xFFE5DFFA),
+        lightPrimaryText = Color(0xFF322659),
+        lightMutedText = Color(0xFF756B94),
+        lightAccent = Color(0xFF7E69E8),
+        darkBg = Color(0xFF14111E),
+        darkCard = Color(0xFF252036),
+        darkTag = Color(0xFF342E4C),
+        darkPrimaryText = Color(0xFFF5F2FF),
+        darkMutedText = Color(0xFFB5ADD1),
+        darkAccent = Color(0xFF9B88FA)
+    ),
+    BgPalette(
+        id = "emerald_mint",
+        label = "Emerald Mint",
+        swatchColor = Color(0xFF2E9E7B),
+        lightBg = Color(0xFFF2FAF7),
+        lightCard = Color(0xFFE2F2EC),
+        lightTag = Color(0xFFD9EDE5),
+        lightPrimaryText = Color(0xFF1B4538),
+        lightMutedText = Color(0xFF5D8074),
+        lightAccent = Color(0xFF268F6E),
+        darkBg = Color(0xFF0E1714),
+        darkCard = Color(0xFF1B2B26),
+        darkTag = Color(0xFF263C35),
+        darkPrimaryText = Color(0xFFEFFAF6),
+        darkMutedText = Color(0xFFA2C2B7),
+        darkAccent = Color(0xFF47C49C)
+    ),
+    BgPalette(
+        id = "rose_slate",
+        label = "Rose Slate",
+        swatchColor = Color(0xFFD96484),
+        lightBg = Color(0xFFFCF4F6),
+        lightCard = Color(0xFFF6E6EA),
+        lightTag = Color(0xFFF2DCE2),
+        lightPrimaryText = Color(0xFF542332),
+        lightMutedText = Color(0xFF8C6470),
+        lightAccent = Color(0xFFD15678),
+        darkBg = Color(0xFF1A1114),
+        darkCard = Color(0xFF2E1F24),
+        darkTag = Color(0xFF402B32),
+        darkPrimaryText = Color(0xFFFFF2F5),
+        darkMutedText = Color(0xFFCCAAB4),
+        darkAccent = Color(0xFFF07898)
+    ),
+    BgPalette(
+        id = "warm_sand",
+        label = "Warm Sand",
+        swatchColor = Color(0xFFC98A3E),
+        lightBg = Color(0xFFFAF7F2),
+        lightCard = Color(0xFFF1EAE0),
+        lightTag = Color(0xFFECE2D4),
+        lightPrimaryText = Color(0xFF4A3720),
+        lightMutedText = Color(0xFF85735D),
+        lightAccent = Color(0xFFBF7E30),
+        darkBg = Color(0xFF181510),
+        darkCard = Color(0xFF2A241C),
+        darkTag = Color(0xFF3A3227),
+        darkPrimaryText = Color(0xFFFCF7F0),
+        darkMutedText = Color(0xFFC7B9A5),
+        darkAccent = Color(0xFFE5A454)
+    )
+)
+
+private var appDarkMode by mutableStateOf(false)
+private var selectedPaletteId by mutableStateOf("cool_blue")
+private var downloadsEnabled by mutableStateOf(true)
+private var downloadOnlyMp4Mkv by mutableStateOf(false)
+
+private val currentPalette: BgPalette
+    get() = bgPalettes.firstOrNull { it.id == selectedPaletteId } ?: bgPalettes.first()
+
+private val bgDark: Color
+    get() = if (appDarkMode) currentPalette.darkBg else currentPalette.lightBg
+private val cardDark: Color
+    get() = if (appDarkMode) currentPalette.darkCard else currentPalette.lightCard
+private val tagDark: Color
+    get() = if (appDarkMode) currentPalette.darkTag else currentPalette.lightTag
+private val textMuted: Color
+    get() = if (appDarkMode) currentPalette.darkMutedText else currentPalette.lightMutedText
+private val primaryText: Color
+    get() = if (appDarkMode) currentPalette.darkPrimaryText else currentPalette.lightPrimaryText
+private val accentRed: Color
+    get() = if (appDarkMode) currentPalette.darkAccent else currentPalette.lightAccent
+private val starGold = Color(0xFFE0A83A)
+
+/* ============================================================================
+   SINGLE-ACTIVE DOWNLOAD QUEUE MANAGER (SAVES TO PUBLIC MOVIES/BeeGear)
+   ============================================================================ */
+private enum class DownloadStatus {
+    QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED
+}
+
+private data class DownloadTaskItem(
+    val id: String,
+    val title: String,
+    val fileName: String,
+    val url: String,
+    val downloadedBytes: Long = 0L,
+    val totalBytes: Long = -1L,
+    val status: DownloadStatus = DownloadStatus.QUEUED,
+    val errorMessage: String = ""
+)
+
+private object DownloadQueueManager {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    val tasks = mutableStateListOf<DownloadTaskItem>()
+    private var activeJob: Job? = null
+    private var activeTaskId: String? = null
+    private var loaded = false
+
+    private fun stateFile(context: Context): File {
+        val dir = File(context.filesDir, "beegear_data").apply { if (!exists()) mkdirs() }
+        return File(dir, "download_queue.json")
+    }
+
+    private fun tempFile(context: Context, fileName: String): File {
+        val dir = File(context.filesDir, "beegear_dl_temp").apply { if (!exists()) mkdirs() }
+        return File(dir, "$fileName.part")
+    }
+
+    fun ensureLoaded(context: Context) {
+        if (loaded) return
+        synchronized(this) {
+            if (loaded) return
+            try {
+                val file = stateFile(context)
+                if (file.exists() && file.length() > 0L) {
+                    val arr = JSONArray(file.readText())
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val rawStatus = obj.optString("status", DownloadStatus.PAUSED.name)
+                        val parsedStatus = try {
+                            val st = DownloadStatus.valueOf(rawStatus)
+                            if (st == DownloadStatus.DOWNLOADING) DownloadStatus.PAUSED else st
+                        } catch (_: Exception) {
+                            DownloadStatus.PAUSED
+                        }
+                        tasks.add(
+                            DownloadTaskItem(
+                                id = obj.optString("id"),
+                                title = obj.optString("title"),
+                                fileName = obj.optString("fileName"),
+                                url = obj.optString("url"),
+                                downloadedBytes = obj.optLong("downloadedBytes", 0L),
+                                totalBytes = obj.optLong("totalBytes", -1L),
+                                status = parsedStatus,
+                                errorMessage = obj.optString("errorMessage", "")
+                            )
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+            }
+            loaded = true
+        }
+    }
+
+    private fun persist(context: Context) {
+        try {
+            val arr = JSONArray()
+            tasks.forEach { t ->
+                arr.put(
+                    JSONObject()
+                        .put("id", t.id)
+                        .put("title", t.title)
+                        .put("fileName", t.fileName)
+                        .put("url", t.url)
+                        .put("downloadedBytes", t.downloadedBytes)
+                        .put("totalBytes", t.totalBytes)
+                        .put("status", t.status.name)
+                        .put("errorMessage", t.errorMessage)
+                )
+            }
+            stateFile(context).writeText(arr.toString())
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun sanitizeFileName(rawTitle: String, url: String): String {
+        val decoded = try {
+            URLDecoder.decode(rawTitle.ifBlank {
+                URL(url).path.substringAfterLast("/").ifBlank { "video.mp4" }
+            }, "UTF-8")
+        } catch (_: Exception) {
+            rawTitle.ifBlank { "video.mp4" }
+        }
+        return decoded.replace(Regex("[\\\\/:*?\"<>|]+"), "_").trim().ifBlank { "beegear_video.mp4" }
+    }
+
+    fun enqueue(context: Context, video: MediaEntry) {
+        ensureLoaded(context)
+        if (!downloadsEnabled) {
+            Toast.makeText(context, "Settings থেকে ডাউনলোড বন্ধ করা আছে।", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val lower = video.url.substringBefore("?").lowercase()
+        if (downloadOnlyMp4Mkv && !(lower.endsWith(".mp4") || lower.endsWith(".mkv"))) {
+            Toast.makeText(context, "Settings অনুযায়ী শুধু MP4 ও MKV ফাইল ডাউনলোড অনুমোদিত।", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val existingIndex = tasks.indexOfFirst { it.url == video.url }
+        if (existingIndex >= 0) {
+            val existing = tasks[existingIndex]
+            if (existing.status == DownloadStatus.COMPLETED) {
+                Toast.makeText(context, "এই ফাইলটি ইতিমধ্যে ডাউনলোড সম্পন্ন হয়েছে।", Toast.LENGTH_SHORT).show()
+                return
+            }
+            if (existing.status == DownloadStatus.PAUSED || existing.status == DownloadStatus.FAILED) {
+                resumeOrStartSingle(context, existing.id)
+            } else {
+                Toast.makeText(context, "ফাইলটি ডাউনলোড লিস্টে আছে।", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        val cleanName = sanitizeFileName(video.name, video.url)
+        val item = DownloadTaskItem(
+            id = System.currentTimeMillis().toString() + "_" + video.url.hashCode(),
+            title = video.name,
+            fileName = cleanName,
+            url = video.url,
+            status = DownloadStatus.QUEUED
+        )
+        tasks.add(item)
+        persist(context)
+        Toast.makeText(context, "ডাউনলোড লিস্টে যুক্ত হয়েছে: $cleanName", Toast.LENGTH_SHORT).show()
+        startNextIfIdle(context)
+    }
+
+    fun pauseTask(context: Context, id: String) {
+        ensureLoaded(context)
+        val idx = tasks.indexOfFirst { it.id == id }
+        if (idx < 0) return
+        if (activeTaskId == id) {
+            activeJob?.cancel()
+            activeJob = null
+            activeTaskId = null
+        }
+        val current = tasks[idx]
+        if (current.status == DownloadStatus.DOWNLOADING || current.status == DownloadStatus.QUEUED) {
+            tasks[idx] = current.copy(status = DownloadStatus.PAUSED)
+            persist(context)
+        }
+        startNextIfIdle(context)
+    }
+
+    /**
+     * একসাথে একটার বেশি ডাউনলোড চলবে না: এটি চালু করলে অন্য কোনো ডাউনলোড চলমান থাকলে সেটি PAUSED হয়ে যাবে।
+     */
+    fun resumeOrStartSingle(context: Context, id: String) {
+        ensureLoaded(context)
+        val targetIdx = tasks.indexOfFirst { it.id == id }
+        if (targetIdx < 0) return
+
+        // চলমান অন্য ডাউনলোড থাকলে পজ করো
+        if (activeTaskId != null && activeTaskId != id) {
+            val runningIdx = tasks.indexOfFirst { it.id == activeTaskId }
+            activeJob?.cancel()
+            activeJob = null
+            activeTaskId = null
+            if (runningIdx >= 0) {
+                tasks[runningIdx] = tasks[runningIdx].copy(status = DownloadStatus.PAUSED)
+            }
+        }
+
+        val target = tasks[targetIdx]
+        if (target.status != DownloadStatus.COMPLETED) {
+            tasks[targetIdx] = target.copy(status = DownloadStatus.QUEUED, errorMessage = "")
+            persist(context)
+            runTask(context, id)
+        }
+    }
+
+    fun deleteTask(context: Context, id: String) {
+        ensureLoaded(context)
+        val idx = tasks.indexOfFirst { it.id == id }
+        if (idx < 0) return
+        val item = tasks[idx]
+        if (activeTaskId == id) {
+            activeJob?.cancel()
+            activeJob = null
+            activeTaskId = null
+        }
+        try {
+            tempFile(context, item.fileName).delete()
+            val publicFile = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+                "BeeGear/${item.fileName}"
+            )
+            if (publicFile.exists()) publicFile.delete()
+        } catch (_: Exception) {
+        }
+        tasks.removeAt(idx)
+        persist(context)
+        startNextIfIdle(context)
+    }
+
+    private fun startNextIfIdle(context: Context) {
+        if (activeJob?.isActive == true) return
+        val next = tasks.firstOrNull { it.status == DownloadStatus.QUEUED } ?: return
+        runTask(context, next.id)
+    }
+
+    private fun runTask(context: Context, id: String) {
+        if (activeJob?.isActive == true) return
+        val idx = tasks.indexOfFirst { it.id == id }
+        if (idx < 0) return
+
+        activeTaskId = id
+        tasks[idx] = tasks[idx].copy(status = DownloadStatus.DOWNLOADING, errorMessage = "")
+        persist(context)
+
+        activeJob = scope.launch {
+            val appCtx = context.applicationContext
+            val taskSnapshot = tasks.firstOrNull { it.id == id } ?: return@launch
+            val partFile = tempFile(appCtx, taskSnapshot.fileName)
+            var conn: HttpURLConnection? = null
+
+            try {
+                var existingBytes = if (partFile.exists()) partFile.length() else 0L
+                conn = (URL(taskSnapshot.url).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 15000
+                    readTimeout = 20000
+                    setRequestProperty("User-Agent", "Mozilla/5.0")
+                    if (existingBytes > 0L) {
+                        setRequestProperty("Range", "bytes=$existingBytes-")
+                    }
+                }
+                conn.connect()
+
+                val responseCode = conn.responseCode
+                val appendMode = responseCode == HttpURLConnection.HTTP_PARTIAL
+                if (!appendMode && existingBytes > 0L) {
+                    existingBytes = 0L
+                    partFile.delete()
+                }
+                if (responseCode !in 200..299) {
+                    throw Exception("Server HTTP $responseCode")
+                }
+
+                val contentLength = conn.contentLengthLong
+                val totalBytes = if (contentLength > 0L) existingBytes + contentLength else -1L
+                updateTask(id) { it.copy(downloadedBytes = existingBytes, totalBytes = totalBytes) }
+
+                var downloaded = existingBytes
+                var lastUiUpdate = 0L
+
+                conn.inputStream.use { input ->
+                    FileOutputStream(partFile, appendMode).use { output ->
+                        val buffer = ByteArray(16 * 1024)
+                        while (isActive) {
+                            val read = input.read(buffer)
+                            if (read == -1) break
+                            output.write(buffer, 0, read)
+                            downloaded += read
+
+                            val now = System.currentTimeMillis()
+                            if (now - lastUiUpdate >= 450L) {
+                                lastUiUpdate = now
+                                updateTask(id) {
+                                    it.copy(
+                                        downloadedBytes = downloaded,
+                                        totalBytes = if (totalBytes > 0L) totalBytes else it.totalBytes
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!isActive) return@launch
+
+                // ডাউনলোড শেষ হলে সরাসরি পাবলিক Movies/BeeGear ফোল্ডারে সেভ করো (Android/data তে নয়)
+                movePartFileToPublicMovies(appCtx, partFile, taskSnapshot.fileName)
+
+                updateTask(id) {
+                    it.copy(
+                        downloadedBytes = downloaded,
+                        totalBytes = if (totalBytes > 0L) totalBytes else downloaded,
+                        status = DownloadStatus.COMPLETED,
+                        errorMessage = ""
+                    )
+                }
+                persist(appCtx)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(appCtx, "সম্পন্ন: Movies/BeeGear/${taskSnapshot.fileName}", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                if (isActive) {
+                    updateTask(id) {
+                        it.copy(
+                            status = DownloadStatus.FAILED,
+                            errorMessage = e.localizedMessage ?: "Download failed"
+                        )
+                    }
+                    persist(appCtx)
+                }
+            } finally {
+                try {
+                    conn?.disconnect()
+                } catch (_: Exception) {
+                }
+                if (activeTaskId == id) {
+                    activeTaskId = null
+                    activeJob = null
+                    startNextIfIdle(appCtx)
+                }
+            }
+        }
+    }
+
+    private fun updateTask(id: String, transform: (DownloadTaskItem) -> DownloadTaskItem) {
+        val idx = tasks.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            tasks[idx] = transform(tasks[idx])
+        }
+    }
+
+    private fun movePartFileToPublicMovies(context: Context, partFile: File, fileName: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = context.contentResolver
+            val values = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Video.Media.MIME_TYPE, guessVideoMime(fileName))
+                put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/BeeGear")
+                put(MediaStore.Video.Media.IS_PENDING, 1)
+            }
+            val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            val uri = resolver.insert(collection, values)
+            if (uri != null) {
+                resolver.openOutputStream(uri)?.use { out: OutputStream ->
+                    partFile.inputStream().use { input ->
+                        input.copyTo(out, 16 * 1024)
+                    }
+                }
+                values.clear()
+                values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+                partFile.delete()
+                return
+            }
+        }
+
+        // Fallback বা Android 9 এবং নিচের ভার্সনের জন্য সরাসরি পাবলিক Movies/BeeGear
+        val moviesDir = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+            "BeeGear"
+        ).apply { if (!exists()) mkdirs() }
+        val destFile = File(moviesDir, fileName)
+        if (destFile.exists()) destFile.delete()
+        partFile.inputStream().use { input ->
+            FileOutputStream(destFile).use { out ->
+                input.copyTo(out, 16 * 1024)
+            }
+        }
+        partFile.delete()
+        MediaScannerConnection.scanFile(context, arrayOf(destFile.absolutePath), null, null)
+    }
+
+    private fun guessVideoMime(fileName: String): String {
+        val lower = fileName.lowercase()
+        return when {
+            lower.endsWith(".mkv") -> "video/x-matroska"
+            lower.endsWith(".webm") -> "video/webm"
+            lower.endsWith(".avi") -> "video/x-msvideo"
+            lower.endsWith(".mov") -> "video/quicktime"
+            else -> "video/mp4"
+        }
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0L) return "0 MB"
+    val mb = bytes / (1024.0 * 1024.0)
+    return if (mb >= 1024.0) {
+        String.format(Locale.US, "%.2f GB", mb / 1024.0)
+    } else {
+        String.format(Locale.US, "%.1f MB", mb)
+    }
+}
 
 /* ============================================================================
    INTERNAL STORAGE ONLY THUMBNAIL & FOLDER MAPPING STORE
@@ -253,45 +797,6 @@ private object InternalStorageStore {
     }
 }
 
-/* ============================================================================
-   DIRECT PUBLIC MOVIES FOLDER DOWNLOAD HELPER (/storage/emulated/0/Movies/BeeGear)
-   ============================================================================ */
-private fun downloadVideoToPublicMovies(context: Context, video: MediaEntry) {
-    try {
-        val rawName = try {
-            URLDecoder.decode(video.name.ifBlank { URI_FILENAME_FALLBACK(video.url) }, "UTF-8")
-        } catch (_: Exception) {
-            video.name.ifBlank { URI_FILENAME_FALLBACK(video.url) }
-        }
-        val cleanName = rawName
-            .replace(Regex("[\\\\/:*?\"<>|]+"), "_")
-            .trim()
-            .ifBlank { "beegear_video.mp4" }
-
-        val request = DownloadManager.Request(Uri.parse(video.url))
-            .setTitle(cleanName)
-            .setDescription("Downloading from BeeGear ISP Server")
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setAllowedOverMetered(true)
-            .setAllowedOverRoaming(true)
-            .setDestinationInExternalPublicDir(Environment.DIRECTORY_MOVIES, "BeeGear/$cleanName")
-
-        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        dm.enqueue(request)
-        Toast.makeText(context, "Movies/BeeGear ফোল্ডারে ডাউনলোড শুরু হয়েছে: $cleanName", Toast.LENGTH_SHORT).show()
-    } catch (e: Exception) {
-        Toast.makeText(context, "ডাউনলোড শুরু করা যায়নি: ${e.localizedMessage ?: "Error"}", Toast.LENGTH_SHORT).show()
-    }
-}
-
-private fun URI_FILENAME_FALLBACK(url: String): String {
-    return try {
-        URL(url).path.substringAfterLast("/").ifBlank { "video.mp4" }
-    } catch (_: Exception) {
-        "video.mp4"
-    }
-}
-
 private fun readRecommendationList(raw: String?): List<Recommendation> {
     if (raw.isNullOrBlank()) return emptyList()
     return try {
@@ -322,15 +827,6 @@ private val categories = listOf(
     Category("Korean TV & Web Series", "http://172.16.50.14/DHAKA-FLIX-14/KOREAN%20TV%20%26%20WEB%20Series/"),
     Category("Animation Movies", "http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies/")
 )
-
-private var appDarkMode by mutableStateOf(false)
-private val bgDark: Color get() = if (appDarkMode) Color(0xFF11131B) else Color(0xFFF5F7FC)
-private val cardDark: Color get() = if (appDarkMode) Color(0xFF222633) else Color(0xFFE8EDF7)
-private val tagDark: Color get() = if (appDarkMode) Color(0xFF30384B) else Color(0xFFE8EDFA)
-private val textMuted: Color get() = if (appDarkMode) Color(0xFFADB7CA) else Color(0xFF718097)
-private val primaryText: Color get() = if (appDarkMode) Color(0xFFF4F6FC) else Color(0xFF263B62)
-private val accentRed = Color(0xFF6579E8)
-private val starGold = Color(0xFFE0A83A)
 
 private val videoExtensions = listOf(".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".ts")
 private val imageExtensions = listOf(".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -437,7 +933,6 @@ private suspend fun findPosterDeep(folderUrl: String): String? = withContext(Dis
 private fun latestFreshnessScore(entry: MediaEntry, nestedMaxModified: Long = 0L): Long {
     val maxDate = maxOf(entry.lastModifiedMs, nestedMaxModified)
     val yearBoost = yearPriorityBoost(entry.name)
-    // সার্ভার লিস্টিংয়ে তারিখ না থাকলে শেষের দিকের (নতুন যুক্ত হওয়া) আইটেমকে সামান্য বেশি গুরুত্ব দেওয়া হবে
     val positionalBoost = entry.sourceOrder.toLong() * 1_000L
     return if (maxDate > 0L) maxDate + yearBoost else yearBoost + positionalBoost
 }
@@ -651,28 +1146,49 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        appDarkMode = getSharedPreferences("beegear_settings", MODE_PRIVATE)
-            .getBoolean("dark_theme", false)
-        applySystemBarColors(appDarkMode)
+        val prefs = getSharedPreferences("beegear_settings", MODE_PRIVATE)
+        appDarkMode = prefs.getBoolean("dark_theme", false)
+        selectedPaletteId = prefs.getString("bg_palette", "cool_blue") ?: "cool_blue"
+        downloadsEnabled = prefs.getBoolean("downloads_enabled", true)
+        downloadOnlyMp4Mkv = prefs.getBoolean("download_only_mp4_mkv", false)
+        DownloadQueueManager.ensureLoaded(this)
+        applySystemBarColors(appDarkMode, bgDark)
+
         setContent {
             MaterialTheme {
                 val isDark = appDarkMode
-                LaunchedEffect(isDark) {
-                    applySystemBarColors(isDark)
+                val currentBg = bgDark
+                SideEffect {
+                    applySystemBarColors(isDark, currentBg)
+                }
+                LaunchedEffect(isDark, currentBg) {
+                    applySystemBarColors(isDark, currentBg)
                 }
                 BeeGearApp()
             }
         }
     }
 
-    private fun applySystemBarColors(isDark: Boolean) {
+    private fun applySystemBarColors(isDark: Boolean, background: Color) {
         val insetsController = WindowInsetsControllerCompat(window, window.decorView)
         insetsController.isAppearanceLightStatusBars = !isDark
         insetsController.isAppearanceLightNavigationBars = !isDark
         @Suppress("DEPRECATION")
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         @Suppress("DEPRECATION")
-        window.navigationBarColor = if (isDark) 0xFF11131B.toInt() else 0xFFF5F7FC.toInt()
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+            window.isStatusBarContrastEnforced = false
+        }
+        window.decorView.setBackgroundColor(
+            android.graphics.Color.argb(
+                255,
+                (background.red * 255).toInt(),
+                (background.green * 255).toInt(),
+                (background.blue * 255).toInt()
+            )
+        )
     }
 }
 
@@ -689,6 +1205,8 @@ fun BeeGearApp() {
     var error by remember { mutableStateOf("") }
     var playingUrl by remember { mutableStateOf<String?>(null) }
     var playingTitle by remember { mutableStateOf("") }
+    var showSettings by remember { mutableStateOf(false) }
+    var showDownloads by remember { mutableStateOf(false) }
     var recommendations by remember { mutableStateOf(emptyList<Recommendation>()) }
     var recommendationsLoading by remember { mutableStateOf(true) }
     var favorites by remember {
@@ -735,6 +1253,8 @@ fun BeeGearApp() {
     }
 
     fun openFolder(title: String, url: String, poster: String? = null) {
+        showSettings = false
+        showDownloads = false
         if (currentUrl.isNotBlank()) {
             stack = stack + FolderLocation(currentTitle, currentUrl, currentPoster)
         }
@@ -746,6 +1266,10 @@ fun BeeGearApp() {
     fun back() {
         if (playingUrl != null) {
             playingUrl = null
+        } else if (showDownloads) {
+            showDownloads = false
+        } else if (showSettings) {
+            showSettings = false
         } else if (stack.isNotEmpty()) {
             val prev = stack.last()
             stack = stack.dropLast(1)
@@ -761,7 +1285,9 @@ fun BeeGearApp() {
         }
     }
 
-    BackHandler(enabled = playingUrl != null || currentUrl.isNotBlank() || tab != "HOME") { back() }
+    BackHandler(enabled = playingUrl != null || showDownloads || showSettings || currentUrl.isNotBlank() || tab != "HOME") {
+        back()
+    }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     val recommendationScope = rememberCoroutineScope()
@@ -811,6 +1337,13 @@ fun BeeGearApp() {
         when {
             playingUrl != null -> VideoPlayerScreen(playingUrl!!, playingTitle) { playingUrl = null }
 
+            showDownloads -> DownloadQueueScreen(onBack = { showDownloads = false })
+
+            showSettings -> SettingsScreen(
+                onBack = { showSettings = false },
+                onOpenDownloads = { showDownloads = true }
+            )
+
             currentUrl.isNotBlank() -> MediaDetailsScreen(
                 title = currentTitle,
                 initialPoster = currentPoster,
@@ -826,6 +1359,7 @@ fun BeeGearApp() {
                     }
                 },
                 onBack = { back() },
+                onOpenDownloads = { showDownloads = true },
                 onFolder = { openFolder(it.name, it.url) },
                 onVideo = { video ->
                     recentlyWatched = (listOf(Recommendation(video.name, video.url, currentPoster, "Continue Watching")) + recentlyWatched)
@@ -834,7 +1368,7 @@ fun BeeGearApp() {
                     playingUrl = video.url
                 },
                 onDownloadVideo = { video ->
-                    downloadVideoToPublicMovies(appContext, video)
+                    DownloadQueueManager.enqueue(appContext, video)
                 }
             )
 
@@ -848,7 +1382,11 @@ fun BeeGearApp() {
                 }
             )
 
-            tab == "BROWSE" -> BrowseScreen(onCategory = { stack = emptyList(); openFolder(it.name, it.url) })
+            tab == "BROWSE" -> BrowseScreen(
+                onCategory = { stack = emptyList(); openFolder(it.name, it.url) },
+                onOpenSettings = { showSettings = true },
+                onOpenDownloads = { showDownloads = true }
+            )
 
             tab == "TRENDING" -> TrendingOrSavedScreen(
                 screenTitle = "Latest Updates",
@@ -871,6 +1409,8 @@ fun BeeGearApp() {
                     appContext.getSharedPreferences("beegear_settings", Context.MODE_PRIVATE)
                         .edit().putBoolean("dark_theme", appDarkMode).apply()
                 },
+                onOpenSettings = { showSettings = true },
+                onOpenDownloads = { showDownloads = true },
                 loading = recommendationsLoading,
                 continueWatching = recentlyWatched,
                 onMenuClick = { tab = "BROWSE" },
@@ -882,7 +1422,7 @@ fun BeeGearApp() {
             )
         }
 
-        if (playingUrl == null && currentUrl.isBlank()) {
+        if (playingUrl == null && currentUrl.isBlank() && !showSettings && !showDownloads) {
             FloatingBottomNav(
                 tab = tab,
                 onSelect = { tab = it },
@@ -895,6 +1435,409 @@ fun BeeGearApp() {
 }
 
 /* ============================================================================
+   SETTINGS SCREEN (THEME + BACKGROUND COLOR PRESETS + DOWNLOAD OPTIONS)
+   ============================================================================ */
+@Composable
+private fun SettingsScreen(
+    onBack: () -> Unit,
+    onOpenDownloads: () -> Unit
+) {
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("beegear_settings", Context.MODE_PRIVATE) }
+    val activeCount = DownloadQueueManager.tasks.count {
+        it.status == DownloadStatus.DOWNLOADING || it.status == DownloadStatus.QUEUED
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(bgDark)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 18.dp, vertical = 16.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(cardDark)
+                    .clickable { onBack() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("‹", color = primaryText, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.width(12.dp))
+            Text("Settings", color = primaryText, fontSize = 24.sp, fontWeight = FontWeight.Black)
+        }
+
+        Spacer(Modifier.height(20.dp))
+
+        // ১. থিম মোড
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(cardDark)
+                .border(1.dp, primaryText.copy(alpha = 0.08f), RoundedCornerShape(20.dp))
+                .padding(16.dp)
+        ) {
+            Text("Theme Mode", color = primaryText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text("Day (Light) এবং Dark মোডের সাথে স্ট্যাটাস বার স্বয়ংক্রিয়ভাবে মানিয়ে নেবে।", color = textMuted, fontSize = 12.sp)
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (!appDarkMode) accentRed else tagDark)
+                        .clickable {
+                            appDarkMode = false
+                            prefs.edit().putBoolean("dark_theme", false).apply()
+                        }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "☀  Day Mode",
+                        color = if (!appDarkMode) Color.White else primaryText,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (appDarkMode) accentRed else tagDark)
+                        .clickable {
+                            appDarkMode = true
+                            prefs.edit().putBoolean("dark_theme", true).apply()
+                        }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "☾  Dark Mode",
+                        color = if (appDarkMode) Color.White else primaryText,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        // ২. ব্যাকগ্রাউন্ড কালার ও ম্যাচিং ফন্ট কালার
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(cardDark)
+                .border(1.dp, primaryText.copy(alpha = 0.08f), RoundedCornerShape(20.dp))
+                .padding(16.dp)
+        ) {
+            Text("Background & Font Color", color = primaryText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text("গ্লাস UI ঠিক রেখে ব্যাকগ্রাউন্ড ও ফন্টের রঙ পরিবর্তন করুন।", color = textMuted, fontSize = 12.sp)
+            Spacer(Modifier.height(14.dp))
+
+            bgPalettes.forEach { palette ->
+                val isSelected = palette.id == selectedPaletteId
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 5.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (isSelected) accentRed.copy(alpha = 0.16f) else tagDark)
+                        .border(
+                            1.5.dp,
+                            if (isSelected) accentRed else Color.Transparent,
+                            RoundedCornerShape(14.dp)
+                        )
+                        .clickable {
+                            selectedPaletteId = palette.id
+                            prefs.edit().putString("bg_palette", palette.id).apply()
+                        }
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        Modifier
+                            .size(26.dp)
+                            .clip(CircleShape)
+                            .background(palette.swatchColor)
+                            .border(2.dp, Color.White, CircleShape)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        palette.label,
+                        color = primaryText,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (isSelected) {
+                        Text("Active", color = accentRed, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        // ৩. ডাউনলোড সেটিংস ও ডাউনলোড ম্যানেজার
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(cardDark)
+                .border(1.dp, primaryText.copy(alpha = 0.08f), RoundedCornerShape(20.dp))
+                .padding(16.dp)
+        ) {
+            Text("Download Settings", color = primaryText, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text("সেভ লোকেশন: Internal Storage / Movies / BeeGear", color = textMuted, fontSize = 12.sp)
+            Spacer(Modifier.height(12.dp))
+
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Enable Video Downloads", color = primaryText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("মুভি ফাইলে ডাউনলোড বাটন সক্রিয় রাখুন", color = textMuted, fontSize = 11.sp)
+                }
+                Switch(
+                    checked = downloadsEnabled,
+                    onCheckedChange = {
+                        downloadsEnabled = it
+                        prefs.edit().putBoolean("downloads_enabled", it).apply()
+                    }
+                )
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Only MP4 & MKV Files", color = primaryText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("অন্যান্য ফরম্যাট ডাউনলোড ব্লক রাখুন", color = textMuted, fontSize = 11.sp)
+                }
+                Switch(
+                    checked = downloadOnlyMp4Mkv,
+                    onCheckedChange = {
+                        downloadOnlyMp4Mkv = it
+                        prefs.edit().putBoolean("download_only_mp4_mkv", it).apply()
+                    }
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(accentRed)
+                    .clickable { onOpenDownloads() }
+                    .padding(vertical = 12.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    if (activeCount > 0) "Open Download Manager ($activeCount Active)"
+                    else "Open Download Manager (${DownloadQueueManager.tasks.size})",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Spacer(Modifier.height(28.dp))
+    }
+}
+
+/* ============================================================================
+   SINGLE-ACTIVE DOWNLOAD QUEUE SCREEN (PAUSE / RESUME / 3-DOT DELETE)
+   ============================================================================ */
+@Composable
+private fun DownloadQueueScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val tasks = DownloadQueueManager.tasks
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(bgDark)
+            .padding(horizontal = 18.dp, vertical = 16.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(cardDark)
+                    .clickable { onBack() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("‹", color = primaryText, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Downloads", color = primaryText, fontSize = 23.sp, fontWeight = FontWeight.Black)
+                Text("Movies/BeeGear • একসাথে ১টি ডাউনলোড চলবে", color = textMuted, fontSize = 11.sp)
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        if (tasks.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("এখনও কোনো ডাউনলোড লিস্টে যোগ করা হয়নি।", color = textMuted, fontSize = 13.sp)
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(bottom = 24.dp)
+            ) {
+                items(tasks, key = { it.id }) { task ->
+                    var menuExpanded by remember(task.id) { mutableStateOf(false) }
+                    val progress = if (task.totalBytes > 0L) {
+                        (task.downloadedBytes.toFloat() / task.totalBytes.toFloat()).coerceIn(0f, 1f)
+                    } else 0f
+
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(cardDark)
+                            .border(1.dp, primaryText.copy(alpha = 0.08f), RoundedCornerShape(16.dp))
+                            .padding(14.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    task.fileName,
+                                    color = primaryText,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                val statusLabel = when (task.status) {
+                                    DownloadStatus.DOWNLOADING -> {
+                                        val pct = if (task.totalBytes > 0L) " (${(progress * 100).toInt()}%)" else ""
+                                        "Downloading • ${formatBytes(task.downloadedBytes)} / ${if (task.totalBytes > 0L) formatBytes(task.totalBytes) else "..."}$pct"
+                                    }
+                                    DownloadStatus.QUEUED -> "Queued • অপেক্ষায় আছে"
+                                    DownloadStatus.PAUSED -> "Paused • ${formatBytes(task.downloadedBytes)}"
+                                    DownloadStatus.COMPLETED -> "Completed • Movies/BeeGear"
+                                    DownloadStatus.FAILED -> "Failed • ${task.errorMessage}"
+                                }
+                                Text(
+                                    statusLabel,
+                                    color = if (task.status == DownloadStatus.FAILED) Color(0xFFE55353) else textMuted,
+                                    fontSize = 11.sp
+                                )
+                            }
+
+                            if (task.status != DownloadStatus.COMPLETED) {
+                                Box(
+                                    Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(accentRed.copy(alpha = 0.18f))
+                                        .clickable {
+                                            if (task.status == DownloadStatus.DOWNLOADING) {
+                                                DownloadQueueManager.pauseTask(context, task.id)
+                                            } else {
+                                                DownloadQueueManager.resumeOrStartSingle(context, task.id)
+                                            }
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = if (task.status == DownloadStatus.DOWNLOADING) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                        contentDescription = "Pause or Start",
+                                        tint = accentRed,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+
+                            Spacer(Modifier.width(4.dp))
+
+                            Box {
+                                Box(
+                                    Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .clickable { menuExpanded = true },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.MoreVert,
+                                        contentDescription = "Options",
+                                        tint = primaryText,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = menuExpanded,
+                                    onDismissRequest = { menuExpanded = false }
+                                ) {
+                                    if (task.status != DownloadStatus.COMPLETED) {
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    if (task.status == DownloadStatus.DOWNLOADING) "Pause" else "Start / Resume"
+                                                )
+                                            },
+                                            onClick = {
+                                                menuExpanded = false
+                                                if (task.status == DownloadStatus.DOWNLOADING) {
+                                                    DownloadQueueManager.pauseTask(context, task.id)
+                                                } else {
+                                                    DownloadQueueManager.resumeOrStartSingle(context, task.id)
+                                                }
+                                            }
+                                        )
+                                    }
+                                    DropdownMenuItem(
+                                        text = { Text("Delete", color = Color(0xFFE55353)) },
+                                        onClick = {
+                                            menuExpanded = false
+                                            DownloadQueueManager.deleteTask(context, task.id)
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        if (task.status == DownloadStatus.DOWNLOADING || task.status == DownloadStatus.PAUSED) {
+                            Spacer(Modifier.height(10.dp))
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(5.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(tagDark)
+                            ) {
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth(progress)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(accentRed)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ============================================================================
    1. HOME SCREEN
    ============================================================================ */
 @Composable
@@ -902,6 +1845,8 @@ private fun HomeScreen(
     recommendations: List<Recommendation>,
     isDarkTheme: Boolean,
     onToggleTheme: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenDownloads: () -> Unit,
     loading: Boolean,
     continueWatching: List<Recommendation>,
     onMenuClick: () -> Unit,
@@ -914,6 +1859,9 @@ private fun HomeScreen(
     val pageState = rememberScrollState()
     val tabState = rememberScrollState()
     val scope = rememberCoroutineScope()
+    val activeDownloads = DownloadQueueManager.tasks.count {
+        it.status == DownloadStatus.DOWNLOADING || it.status == DownloadStatus.QUEUED
+    }
 
     Column(
         Modifier
@@ -929,33 +1877,69 @@ private fun HomeScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("Bee", color = primaryText, fontSize = 27.sp, fontWeight = FontWeight.ExtraBold)
-            Text("Gear", color = Color(0xFF6578E8), fontSize = 27.sp, fontWeight = FontWeight.ExtraBold)
+            Text("Gear", color = accentRed, fontSize = 27.sp, fontWeight = FontWeight.ExtraBold)
             Spacer(Modifier.weight(1f))
+
             Box(
                 Modifier
                     .size(38.dp)
                     .clip(CircleShape)
-                    .background(if (isDarkTheme) Color(0xFF30384B) else Color(0xFFE8EDFF))
+                    .background(cardDark)
+                    .clickable { onOpenDownloads() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Download,
+                    contentDescription = "Downloads",
+                    tint = if (activeDownloads > 0) accentRed else primaryText,
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+
+            Box(
+                Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(cardDark)
                     .clickable { onToggleTheme() },
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     if (isDarkTheme) "☀" else "☾",
-                    color = if (isDarkTheme) Color.White else Color(0xFF53688C),
-                    fontSize = 19.sp
+                    color = primaryText,
+                    fontSize = 18.sp
                 )
             }
-            Spacer(Modifier.width(9.dp))
+            Spacer(Modifier.width(8.dp))
+
             Box(
                 Modifier
-                    .size(42.dp)
+                    .size(38.dp)
                     .clip(CircleShape)
-                    .background(if (isDarkTheme) Color(0xFF30384B) else Color(0xFFE8EDFF))
-                    .border(1.dp, if (isDarkTheme) Color(0xFF59647A) else Color.White, CircleShape)
+                    .background(cardDark)
+                    .clickable { onOpenSettings() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Settings,
+                    contentDescription = "Settings",
+                    tint = primaryText,
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+
+            Box(
+                Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(cardDark)
+                    .border(1.dp, primaryText.copy(alpha = 0.14f), CircleShape)
                     .clickable { onMenuClick() },
                 contentAlignment = Alignment.Center
             ) {
-                Text("☰", color = if (isDarkTheme) Color.White else Color(0xFF53688C), fontSize = 20.sp)
+                Text("☰", color = primaryText, fontSize = 19.sp)
             }
         }
 
@@ -1106,10 +2090,10 @@ private fun HomeScreen(
                             Modifier
                                 .fillMaxWidth()
                                 .aspectRatio(16f / 9f)
-                                .background(if (appDarkMode) Color(0xFF25252D) else Color(0xFFE4EAF4))
+                                .background(tagDark)
                         ) {
                             if (item.poster != null) NetworkPoster(item.poster, Modifier.fillMaxSize())
-                            Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color(0xFF687080)))
+                            Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(accentRed))
                         }
                         Text(
                             item.title,
@@ -1186,7 +2170,7 @@ private fun GlassCategorySection(
             .padding(horizontal = 14.dp, vertical = 8.dp)
             .clip(RoundedCornerShape(20.dp))
             .background(cardDark)
-            .border(1.dp, if (appDarkMode) Color.White.copy(alpha = .08f) else Color(0xFFDDE4F0), RoundedCornerShape(20.dp))
+            .border(1.dp, primaryText.copy(alpha = .08f), RoundedCornerShape(20.dp))
             .padding(vertical = 13.dp)
     ) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1214,11 +2198,11 @@ private fun GlassCategorySection(
                         Modifier
                             .width(124.dp)
                             .clip(RoundedCornerShape(13.dp))
-                            .background(if (appDarkMode) Color(0xFF171B25) else Color(0xFFF8FAFE))
-                            .border(1.dp, if (appDarkMode) Color.White.copy(alpha = .07f) else Color(0xFFE1E7F0), RoundedCornerShape(13.dp))
+                            .background(bgDark.copy(alpha = 0.65f))
+                            .border(1.dp, primaryText.copy(alpha = .07f), RoundedCornerShape(13.dp))
                             .clickable { onOpen(item) }
                     ) {
-                        Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).background(if (appDarkMode) Color(0xFF252B38) else Color(0xFFE1E7F0))) {
+                        Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).background(tagDark)) {
                             if (item.poster != null) NetworkPoster(item.poster, Modifier.fillMaxSize())
                             else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text("BeeGear", color = accentRed, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
@@ -1241,7 +2225,7 @@ private fun GlassCategorySection(
 }
 
 /* ============================================================================
-   2. DETAILS & FOLDER SCREEN (WITH DIRECT DOWNLOAD TO MOVIES FOLDER)
+   2. DETAILS & FOLDER SCREEN
    ============================================================================ */
 @Composable
 private fun MediaDetailsScreen(
@@ -1253,6 +2237,7 @@ private fun MediaDetailsScreen(
     isFavorite: Boolean,
     onToggleFavorite: () -> Unit,
     onBack: () -> Unit,
+    onOpenDownloads: () -> Unit,
     onFolder: (MediaEntry) -> Unit,
     onVideo: (MediaEntry) -> Unit,
     onDownloadVideo: (MediaEntry) -> Unit
@@ -1269,7 +2254,7 @@ private fun MediaDetailsScreen(
         item {
             Box(Modifier.fillMaxWidth().height(310.dp)) {
                 if (initialPoster != null) NetworkPoster(initialPoster, Modifier.fillMaxSize())
-                else Box(Modifier.fillMaxSize().background(Color(0xFF1F1F26)))
+                else Box(Modifier.fillMaxSize().background(cardDark))
 
                 Box(
                     Modifier
@@ -1286,14 +2271,28 @@ private fun MediaDetailsScreen(
                             .clickable { onBack() },
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("‹", color = primaryText, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        Text("‹", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                     }
                     Spacer(Modifier.weight(1f))
                     Box(Modifier.size(28.dp).clip(RoundedCornerShape(7.dp)).background(accentRed), contentAlignment = Alignment.Center) {
                         Text("B", color = Color.White, fontWeight = FontWeight.Black, fontSize = 16.sp)
                     }
                     Spacer(Modifier.weight(1f))
-                    Spacer(Modifier.size(36.dp))
+                    Box(
+                        Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.5f))
+                            .clickable { onOpenDownloads() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Download,
+                            contentDescription = "Downloads",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
 
                 Box(
@@ -1306,7 +2305,7 @@ private fun MediaDetailsScreen(
                         .clickable(enabled = firstVideo != null) { if (firstVideo != null) onVideo(firstVideo) },
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("▶", color = primaryText, fontSize = 20.sp)
+                    Text("▶", color = Color.White, fontSize = 20.sp)
                 }
             }
         }
@@ -1358,7 +2357,7 @@ private fun MediaDetailsScreen(
                 Text("Story Line", color = primaryText, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "Streaming directly from your local ISP media server ($title). Tap any video to play or download directly to Movies/BeeGear.",
+                    text = "Streaming directly from your local ISP media server ($title). Tap any video to play or add to your download queue.",
                     color = textMuted,
                     fontSize = 12.sp,
                     lineHeight = 18.sp
@@ -1388,6 +2387,8 @@ private fun MediaDetailsScreen(
                 )
             }
             items(videos, key = { it.url }) { video ->
+                val queuedTask = DownloadQueueManager.tasks.firstOrNull { it.url == video.url }
+
                 Column(
                     Modifier
                         .fillMaxWidth()
@@ -1432,25 +2433,37 @@ private fun MediaDetailsScreen(
                         ) {
                             Text("▶ Play Now", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
-                        Box(
-                            Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(tagDark)
-                                .border(1.dp, accentRed.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
-                                .clickable { onDownloadVideo(video) }
-                                .padding(vertical = 8.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Filled.Download,
-                                    contentDescription = "Download",
-                                    tint = primaryText,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text("Download", color = primaryText, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        if (downloadsEnabled) {
+                            Box(
+                                Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(tagDark)
+                                    .border(1.dp, accentRed.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+                                    .clickable {
+                                        if (queuedTask != null) onOpenDownloads()
+                                        else onDownloadVideo(video)
+                                    }
+                                    .padding(vertical = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Download,
+                                        contentDescription = "Download",
+                                        tint = primaryText,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    val dlText = when (queuedTask?.status) {
+                                        DownloadStatus.DOWNLOADING -> "Downloading..."
+                                        DownloadStatus.QUEUED -> "In Queue"
+                                        DownloadStatus.PAUSED -> "Paused"
+                                        DownloadStatus.COMPLETED -> "Downloaded"
+                                        else -> "Download"
+                                    }
+                                    Text(dlText, color = primaryText, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
@@ -1506,7 +2519,7 @@ private fun FolderCard(folder: MediaEntry, modifier: Modifier, onClick: () -> Un
             Modifier
                 .fillMaxWidth()
                 .height(150.dp)
-                .background(if (appDarkMode) Color(0xFF25252D) else Color(0xFFE4EAF4)),
+                .background(tagDark),
             contentAlignment = Alignment.Center
         ) {
             if (poster != null) NetworkPoster(poster!!, Modifier.fillMaxSize())
@@ -1543,7 +2556,7 @@ private fun SearchScreen(onOpenFolder: (SearchHit) -> Unit, onPlayVideo: (Search
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(16.dp))
                 .background(cardDark)
-                .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(16.dp))
+                .border(1.dp, primaryText.copy(alpha = .10f), RoundedCornerShape(16.dp))
                 .padding(horizontal = 14.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -1605,7 +2618,7 @@ private fun SearchScreen(onOpenFolder: (SearchHit) -> Unit, onPlayVideo: (Search
                             .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(Modifier.size(58.dp, 76.dp).clip(RoundedCornerShape(8.dp)).background(if (appDarkMode) Color(0xFF30384B) else Color(0xFFE4EAF4))) {
+                        Box(Modifier.size(58.dp, 76.dp).clip(RoundedCornerShape(8.dp)).background(tagDark)) {
                             if (hit.poster != null) NetworkPoster(hit.poster, Modifier.fillMaxSize())
                             else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text(if (hit.isVideo) "▶" else "▣", color = accentRed)
@@ -1625,9 +2638,41 @@ private fun SearchScreen(onOpenFolder: (SearchHit) -> Unit, onPlayVideo: (Search
 }
 
 @Composable
-private fun BrowseScreen(onCategory: (Category) -> Unit) {
+private fun BrowseScreen(
+    onCategory: (Category) -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenDownloads: () -> Unit
+) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 100.dp)) {
-        Text("Browse Categories", Modifier.padding(start = 20.dp, top = 24.dp, bottom = 16.dp), color = primaryText, fontSize = 24.sp, fontWeight = FontWeight.Black)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 20.dp, end = 18.dp, top = 24.dp, bottom = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Browse Categories", color = primaryText, fontSize = 24.sp, fontWeight = FontWeight.Black, modifier = Modifier.weight(1f))
+            Box(
+                Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(cardDark)
+                    .clickable { onOpenDownloads() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Filled.Download, contentDescription = "Downloads", tint = primaryText, modifier = Modifier.size(19.dp))
+            }
+            Spacer(Modifier.width(8.dp))
+            Box(
+                Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(cardDark)
+                    .clickable { onOpenSettings() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Filled.Settings, contentDescription = "Settings", tint = primaryText, modifier = Modifier.size(19.dp))
+            }
+        }
         categories.forEach { category ->
             Row(
                 Modifier
@@ -1670,7 +2715,7 @@ private fun TrendingOrSavedScreen(
                                 Modifier
                                     .fillMaxWidth()
                                     .height(175.dp)
-                                    .background(if (appDarkMode) Color(0xFF25252D) else Color(0xFFE4EAF4)),
+                                    .background(tagDark),
                                 contentAlignment = Alignment.Center
                             ) {
                                 if (item.poster != null) NetworkPoster(item.poster, Modifier.fillMaxSize())
@@ -1696,7 +2741,7 @@ private fun TrendingOrSavedScreen(
 }
 
 /* ============================================================================
-   4. FLOATING PILL BOTTOM NAVIGATION BAR
+   4. FLOATING PILL BOTTOM NAVIGATION BAR (GLASS UI PRESERVED)
    ============================================================================ */
 @Composable
 private fun FloatingBottomNav(tab: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
@@ -1773,7 +2818,7 @@ private fun NetworkPoster(url: String, modifier: Modifier = Modifier) {
     if (bitmap != null) {
         Image(bitmap!!.asImageBitmap(), null, modifier, contentScale = ContentScale.Crop)
     } else {
-        Box(modifier.background(if (appDarkMode) Color(0xFF24242C) else Color(0xFFE4EAF4)), contentAlignment = Alignment.Center) {
+        Box(modifier.background(tagDark), contentAlignment = Alignment.Center) {
             Text("BEEGEAR", color = accentRed, fontWeight = FontWeight.Black, fontSize = 11.sp)
         }
     }
