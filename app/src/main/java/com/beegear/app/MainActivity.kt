@@ -123,7 +123,6 @@ private val categories = listOf(
     Category("Animation Movies", "http://172.16.50.14/DHAKA-FLIX-14/Animation%20Movies/")
 )
 
-// Mockup Theme Colors
 private var appDarkMode by mutableStateOf(false)
 private val bgDark: Color get() = if (appDarkMode) Color(0xFF11131B) else Color(0xFFF5F7FC)
 private val cardDark: Color get() = if (appDarkMode) Color(0xFF222633) else Color(0xFFE8EDF7)
@@ -166,6 +165,28 @@ private suspend fun scanFolder(url: String): Result<List<MediaEntry>> = withCont
     } catch (e: Exception) {
         Result.failure(e)
     }
+}
+
+/**
+ * পোস্টার খোঁজার জন্য ৩ লেভেল পর্যন্ত গভীরে যায়।
+ * Anime-র মতো deep folder structure-এও কাজ করবে।
+ */
+private suspend fun findPosterDeep(folderUrl: String): String? = withContext(Dispatchers.IO) {
+    // লেভেল ১
+    val level1 = scanFolder(folderUrl).getOrNull().orEmpty()
+    val poster1 = level1.firstOrNull { it.isImage }?.url
+    if (poster1 != null) return@withContext poster1
+
+    // লেভেল ২: প্রথম সাব-ফোল্ডারে খোঁজো
+    val subFolder1 = level1.firstOrNull { it.isFolder } ?: return@withContext null
+    val level2 = scanFolder(subFolder1.url).getOrNull().orEmpty()
+    val poster2 = level2.firstOrNull { it.isImage }?.url
+    if (poster2 != null) return@withContext poster2
+
+    // লেভেল ৩: আরও একটা লেভেল গভীরে
+    val subFolder2 = level2.firstOrNull { it.isFolder } ?: return@withContext null
+    val level3 = scanFolder(subFolder2.url).getOrNull().orEmpty()
+    level3.firstOrNull { it.isImage }?.url
 }
 
 private suspend fun loadRecommendations(): List<Recommendation> {
@@ -302,35 +323,30 @@ private suspend fun findSameFolderSubtitles(videoUrl: String): List<MediaItem.Su
         }
     }
 
-// ============================================================
-// FIX 1: Status bar & navigation bar থিমের সাথে মেলানো
-// ============================================================
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // Edge-to-edge enable করো যাতে আমরা নিজে কালার কন্ট্রোল করতে পারি
         WindowCompat.setDecorFitsSystemWindows(window, false)
-
         appDarkMode = getSharedPreferences("beegear_settings", MODE_PRIVATE)
             .getBoolean("dark_theme", false)
-
+        applySystemBarColors(appDarkMode)
         setContent {
             MaterialTheme {
-                // থিম চেঞ্জ হলে স্ট্যাটাস বার ও নেভ বার আপডেট হবে
                 val isDark = appDarkMode
-                val insetsController = remember {
-                    WindowInsetsControllerCompat(window, window.decorView)
-                }
                 LaunchedEffect(isDark) {
-                    insetsController.isAppearanceLightStatusBars = !isDark
-                    insetsController.isAppearanceLightNavigationBars = !isDark
-                    window.statusBarColor = if (isDark) 0xFF11131B.toInt() else 0xFFF5F7FC.toInt()
-                    window.navigationBarColor = if (isDark) 0xFF11131B.toInt() else 0xFFF5F7FC.toInt()
+                    applySystemBarColors(isDark)
                 }
                 BeeGearApp()
             }
         }
+    }
+
+    private fun applySystemBarColors(isDark: Boolean) {
+        val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+        insetsController.isAppearanceLightStatusBars = !isDark
+        insetsController.isAppearanceLightNavigationBars = !isDark
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = if (isDark) 0xFF11131B.toInt() else 0xFFF5F7FC.toInt()
     }
 }
 
@@ -475,38 +491,35 @@ fun BeeGearApp() {
                 },
                 onBack = { back() },
                 onFolder = { openFolder(it.name, it.url) },
-                onVideo = { video -> recentlyWatched = (listOf(Recommendation(video.name, video.url, currentPoster, "Continue Watching")) + recentlyWatched).distinctBy { it.url }.take(12); playingTitle = video.name; playingUrl = video.url }
+                onVideo = { video ->
+                    recentlyWatched = (listOf(Recommendation(video.name, video.url, currentPoster, "Continue Watching")) + recentlyWatched).distinctBy { it.url }.take(12)
+                    playingTitle = video.name
+                    playingUrl = video.url
+                }
             )
 
             tab == "SEARCH" -> SearchScreen(
                 onOpenFolder = { hit -> stack = emptyList(); openFolder(hit.title, hit.url, hit.poster) },
-                onPlayVideo = { hit -> recentlyWatched = (listOf(Recommendation(hit.title, hit.url, hit.poster, "Continue Watching")) + recentlyWatched).distinctBy { it.url }.take(12); playingTitle = hit.title; playingUrl = hit.url }
-            )
-
-            tab == "BROWSE" -> BrowseScreen(
-                onCategory = {
-                    stack = emptyList()
-                    openFolder(it.name, it.url)
+                onPlayVideo = { hit ->
+                    recentlyWatched = (listOf(Recommendation(hit.title, hit.url, hit.poster, "Continue Watching")) + recentlyWatched).distinctBy { it.url }.take(12)
+                    playingTitle = hit.title
+                    playingUrl = hit.url
                 }
             )
+
+            tab == "BROWSE" -> BrowseScreen(onCategory = { stack = emptyList(); openFolder(it.name, it.url) })
 
             tab == "TRENDING" -> TrendingOrSavedScreen(
                 screenTitle = "Trending Now",
                 items = recommendations.asReversed(),
-                onOpen = {
-                    stack = emptyList()
-                    openFolder(it.title, it.url, it.poster)
-                }
+                onOpen = { stack = emptyList(); openFolder(it.title, it.url, it.poster) }
             )
 
             tab == "FAVORITES" -> TrendingOrSavedScreen(
                 screenTitle = "My Favorites",
                 items = favorites,
                 emptyMessage = "এখনও কোনো মুভি ফেভারিট লিস্টে যোগ করা হয়নি।",
-                onOpen = {
-                    stack = emptyList()
-                    openFolder(it.title, it.url, it.poster)
-                }
+                onOpen = { stack = emptyList(); openFolder(it.title, it.url, it.poster) }
             )
 
             else -> HomeScreen(
@@ -521,14 +534,8 @@ fun BeeGearApp() {
                 continueWatching = recentlyWatched,
                 onMenuClick = { tab = "BROWSE" },
                 onSeeAll = { tab = "BROWSE" },
-                onCategory = {
-                    stack = emptyList()
-                    openFolder(it.name, it.url)
-                },
-                onOpen = {
-                    stack = emptyList()
-                    openFolder(it.title, it.url, it.poster)
-                },
+                onCategory = { stack = emptyList(); openFolder(it.name, it.url) },
+                onOpen = { stack = emptyList(); openFolder(it.title, it.url, it.poster) },
                 onToggleFavorite = { item ->
                     favorites = if (favorites.any { it.url == item.url }) favorites.filterNot { it.url == item.url } else favorites + item
                 },
@@ -541,9 +548,7 @@ fun BeeGearApp() {
             FloatingBottomNav(
                 tab = tab,
                 onSelect = { tab = it },
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(horizontal = 22.dp, vertical = 16.dp)
+                modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 22.dp, vertical = 16.dp)
             )
         }
     }
@@ -572,10 +577,7 @@ private fun HomeScreen(
     val scope = rememberCoroutineScope()
 
     Column(
-        Modifier.fillMaxSize()
-            .background(bgDark)
-            .verticalScroll(pageState)
-            .padding(bottom = 112.dp)
+        Modifier.fillMaxSize().background(bgDark).verticalScroll(pageState).padding(bottom = 112.dp)
     ) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp),
@@ -601,8 +603,7 @@ private fun HomeScreen(
         }
 
         Row(
-            Modifier.fillMaxWidth().horizontalScroll(tabState)
-                .padding(start = 18.dp, end = 18.dp, bottom = 14.dp),
+            Modifier.fillMaxWidth().horizontalScroll(tabState).padding(start = 18.dp, end = 18.dp, bottom = 14.dp),
             horizontalArrangement = Arrangement.spacedBy(20.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -634,25 +635,20 @@ private fun HomeScreen(
                 }
             }
         }
+
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Featured for You", color = primaryText, fontSize = 19.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             Text("7–8 picks", color = textMuted, fontSize = 11.sp)
         }
+
         if (featured.isEmpty()) {
             Box(Modifier.fillMaxWidth().height(230.dp), contentAlignment = Alignment.Center) {
                 if (loading) CircularProgressIndicator(color = accentRed) else Text("Your ISP library is ready to explore", color = textMuted)
             }
         } else {
-            LazyRow(
-                state = featuredState,
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
+            LazyRow(state = featuredState, contentPadding = PaddingValues(start = 16.dp, end = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(featured, key = { it.url }) { item ->
-                    Box(
-                        Modifier.width(278.dp).aspectRatio(2f / 3f).clip(RoundedCornerShape(22.dp))
-                            .background(cardDark).clickable { onOpen(item) }
-                    ) {
+                    Box(Modifier.width(278.dp).aspectRatio(2f / 3f).clip(RoundedCornerShape(22.dp)).background(cardDark).clickable { onOpen(item) }) {
                         if (item.poster != null) NetworkPoster(item.poster, Modifier.fillMaxSize())
                         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000), Color(0xF0000000)))))
                         Column(Modifier.align(Alignment.BottomStart).padding(17.dp)) {
@@ -755,7 +751,8 @@ private fun GlassCategorySection(
         } else {
             LazyRow(contentPadding = PaddingValues(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(11.dp)) {
                 items(items.take(12), key = { it.url }) { item ->
-                    Column(Modifier.width(124.dp).clip(RoundedCornerShape(13.dp)).background(if (appDarkMode) Color(0xFF171B25) else Color(0xFFF8FAFE))
+                    Column(Modifier.width(124.dp).clip(RoundedCornerShape(13.dp))
+                        .background(if (appDarkMode) Color(0xFF171B25) else Color(0xFFF8FAFE))
                         .border(1.dp, if (appDarkMode) Color.White.copy(alpha = .07f) else Color(0xFFE1E7F0), RoundedCornerShape(13.dp))
                         .clickable { onOpen(item) }) {
                         Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).background(if (appDarkMode) Color(0xFF252B38) else Color(0xFFE1E7F0))) {
@@ -792,62 +789,19 @@ private fun MediaDetailsScreen(
     val videos = entries.filter { it.isVideo }
     val firstVideo = videos.firstOrNull()
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(bgDark)
-            .verticalScroll(rememberScrollState())
-            .padding(bottom = 30.dp)
-    ) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(310.dp)
-        ) {
-            if (initialPoster != null) {
-                NetworkPoster(initialPoster, Modifier.fillMaxSize())
-            } else {
-                Box(Modifier.fillMaxSize().background(Color(0xFF1F1F26)))
-            }
+    Column(Modifier.fillMaxSize().background(bgDark).verticalScroll(rememberScrollState()).padding(bottom = 30.dp)) {
+        Box(Modifier.fillMaxWidth().height(310.dp)) {
+            if (initialPoster != null) NetworkPoster(initialPoster, Modifier.fillMaxSize())
+            else Box(Modifier.fillMaxSize().background(Color(0xFF1F1F26)))
 
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(
-                                Color.Black.copy(alpha = 0.55f),
-                                Color.Transparent,
-                                bgDark
-                            )
-                        )
-                    )
-            )
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(colors = listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent, bgDark))))
 
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .clickable { onBack() },
-                    contentAlignment = Alignment.Center
-                ) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(36.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.5f)).clickable { onBack() }, contentAlignment = Alignment.Center) {
                     Text("‹", color = primaryText, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 }
                 Spacer(Modifier.weight(1f))
-                Box(
-                    Modifier
-                        .size(28.dp)
-                        .clip(RoundedCornerShape(7.dp))
-                        .background(accentRed),
-                    contentAlignment = Alignment.Center
-                ) {
+                Box(Modifier.size(28.dp).clip(RoundedCornerShape(7.dp)).background(accentRed), contentAlignment = Alignment.Center) {
                     Text("B", color = Color.White, fontWeight = FontWeight.Black, fontSize = 16.sp)
                 }
                 Spacer(Modifier.weight(1f))
@@ -855,156 +809,66 @@ private fun MediaDetailsScreen(
             }
 
             Box(
-                Modifier
-                    .align(Alignment.Center)
-                    .size(58.dp)
-                    .clip(CircleShape)
+                Modifier.align(Alignment.Center).size(58.dp).clip(CircleShape)
                     .background(Color.White.copy(alpha = 0.25f))
                     .border(1.5.dp, Color.White.copy(alpha = 0.7f), CircleShape)
-                    .clickable(enabled = firstVideo != null) {
-                        if (firstVideo != null) onVideo(firstVideo)
-                    },
+                    .clickable(enabled = firstVideo != null) { if (firstVideo != null) onVideo(firstVideo) },
                 contentAlignment = Alignment.Center
-            ) {
-                Text("▶", color = primaryText, fontSize = 20.sp)
-            }
+            ) { Text("▶", color = primaryText, fontSize = 20.sp) }
         }
 
         Column(
-            Modifier
-                .fillMaxWidth()
-                .offset(y = (-24).dp)
+            Modifier.fillMaxWidth().offset(y = (-24).dp)
                 .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
-                .background(bgDark)
-                .padding(horizontal = 22.dp, vertical = 16.dp)
+                .background(bgDark).padding(horizontal = 22.dp, vertical = 16.dp)
         ) {
-            Text(
-                text = title,
-                color = primaryText,
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Black,
-                textAlign = TextAlign.Center,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.fillMaxWidth()
-            )
+            Text(text = title, color = primaryText, fontSize = 24.sp, fontWeight = FontWeight.Black, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
             Text(
                 text = if (videos.isNotEmpty()) "${videos.size} Video File(s) Ready to Stream" else "ISP Media Library Directory",
-                color = textMuted,
-                fontSize = 12.sp,
-                textAlign = TextAlign.Center,
+                color = textMuted, fontSize = 12.sp, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
             )
-
             Spacer(Modifier.height(16.dp))
-
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                MetaChip("HD Stream")
-                Spacer(Modifier.width(8.dp))
-                MetaChip("16+")
-                Spacer(Modifier.width(8.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                MetaChip("HD Stream"); Spacer(Modifier.width(8.dp))
+                MetaChip("16+"); Spacer(Modifier.width(8.dp))
                 MetaChip("★ 4.5", textColor = starGold)
-
                 Spacer(Modifier.weight(1f))
-
-                Box(
-                    Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(tagDark)
-                        .clickable { onToggleFavorite() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        if (isFavorite) "♥" else "♡",
-                        color = if (isFavorite) accentRed else primaryText,
-                        fontSize = 16.sp
-                    )
+                Box(Modifier.size(36.dp).clip(CircleShape).background(tagDark).clickable { onToggleFavorite() }, contentAlignment = Alignment.Center) {
+                    Text(if (isFavorite) "♥" else "♡", color = if (isFavorite) accentRed else primaryText, fontSize = 16.sp)
                 }
             }
-
             Spacer(Modifier.height(20.dp))
-
             Text("Story Line", color = primaryText, fontSize = 15.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
-            Text(
-                text = "Streaming directly from your local ISP media server ($title). Select any playable video or season folder below to start instant playback.",
-                color = textMuted,
-                fontSize = 12.sp,
-                lineHeight = 18.sp
-            )
-
+            Text(text = "Streaming directly from your local ISP media server ($title). Select any playable video or season folder below to start instant playback.", color = textMuted, fontSize = 12.sp, lineHeight = 18.sp)
             Spacer(Modifier.height(22.dp))
 
             if (loading) {
-                Box(Modifier.fillMaxWidth().height(140.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = accentRed)
-                }
+                Box(Modifier.fillMaxWidth().height(140.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = accentRed) }
             } else if (error.isNotBlank()) {
                 Text("Server error: $error", color = Color(0xFFFF7777), fontSize = 13.sp)
             } else {
                 if (videos.isNotEmpty()) {
-                    Text(
-                        "Playable Files (${videos.size})",
-                        color = primaryText,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 10.dp)
-                    )
+                    Text("Playable Files (${videos.size})", color = primaryText, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 10.dp))
                     videos.forEach { video ->
                         Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 5.dp)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(cardDark)
-                                .clickable { onVideo(video) }
-                                .padding(14.dp),
+                            Modifier.fillMaxWidth().padding(vertical = 5.dp).clip(RoundedCornerShape(14.dp)).background(cardDark).clickable { onVideo(video) }.padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Box(
-                                Modifier
-                                    .size(34.dp)
-                                    .clip(CircleShape)
-                                    .background(accentRed),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("▶", color = primaryText, fontSize = 12.sp)
-                            }
+                            Box(Modifier.size(34.dp).clip(CircleShape).background(accentRed), contentAlignment = Alignment.Center) { Text("▶", color = primaryText, fontSize = 12.sp) }
                             Spacer(Modifier.width(12.dp))
-                            Text(
-                                video.name,
-                                color = primaryText,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
+                            Text(video.name, color = primaryText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                         }
                     }
                     Spacer(Modifier.height(16.dp))
                 }
 
                 if (folders.isNotEmpty()) {
-                    Text(
-                        "Folders & Seasons (${folders.size})",
-                        color = primaryText,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
+                    Text("Folders & Seasons (${folders.size})", color = primaryText, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 12.dp))
                     folders.chunked(2).forEach { pair ->
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            pair.forEach { folder ->
-                                FolderCard(folder, Modifier.weight(1f)) { onFolder(folder) }
-                            }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            pair.forEach { folder -> FolderCard(folder, Modifier.weight(1f)) { onFolder(folder) } }
                             if (pair.size == 1) Spacer(Modifier.weight(1f))
                         }
                         Spacer(Modifier.height(12.dp))
@@ -1021,12 +885,7 @@ private fun MediaDetailsScreen(
 
 @Composable
 private fun MetaChip(label: String, textColor: Color = primaryText) {
-    Box(
-        Modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(tagDark)
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-    ) {
+    Box(Modifier.clip(RoundedCornerShape(10.dp)).background(tagDark).padding(horizontal = 12.dp, vertical = 6.dp)) {
         Text(label, color = textColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
     }
 }
@@ -1035,36 +894,18 @@ private fun MetaChip(label: String, textColor: Color = primaryText) {
 private fun FolderCard(folder: MediaEntry, modifier: Modifier, onClick: () -> Unit) {
     var poster by remember(folder.url) { mutableStateOf<String?>(null) }
     LaunchedEffect(folder.url) {
-        poster = scanFolder(folder.url).getOrNull()?.firstOrNull { it.isImage }?.url
+        // ৩ লেভেল পর্যন্ত গভীরে পোস্টার খোঁজো
+        poster = findPosterDeep(folder.url)
     }
-    Column(
-        modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(cardDark)
-            .clickable { onClick() }
-    ) {
+    Column(modifier.clip(RoundedCornerShape(16.dp)).background(cardDark).clickable { onClick() }) {
         Box(
-            Modifier
-                .fillMaxWidth()
-                .height(150.dp)
-                .background(if (appDarkMode) Color(0xFF25252D) else Color(0xFFE4EAF4)),
+            Modifier.fillMaxWidth().height(150.dp).background(if (appDarkMode) Color(0xFF25252D) else Color(0xFFE4EAF4)),
             contentAlignment = Alignment.Center
         ) {
-            if (poster != null) {
-                NetworkPoster(poster!!, Modifier.fillMaxSize())
-            } else {
-                Text("BEEGEAR", color = accentRed, fontWeight = FontWeight.Black, fontSize = 12.sp)
-            }
+            if (poster != null) NetworkPoster(poster!!, Modifier.fillMaxSize())
+            else Text("BEEGEAR", color = accentRed, fontWeight = FontWeight.Black, fontSize = 12.sp)
         }
-        Text(
-            folder.name,
-            Modifier.padding(10.dp),
-            color = primaryText,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
+        Text(folder.name, Modifier.padding(10.dp), color = primaryText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1117,47 +958,16 @@ private fun SearchScreen(onOpenFolder: (SearchHit) -> Unit, onPlayVideo: (Search
 
 @Composable
 private fun BrowseScreen(onCategory: (Category) -> Unit) {
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(bottom = 100.dp)
-    ) {
-        Text(
-            "Browse Categories",
-            Modifier.padding(start = 20.dp, top = 24.dp, bottom = 16.dp),
-            color = primaryText,
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Black
-        )
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 100.dp)) {
+        Text("Browse Categories", Modifier.padding(start = 20.dp, top = 24.dp, bottom = 16.dp), color = primaryText, fontSize = 24.sp, fontWeight = FontWeight.Black)
         categories.forEach { category ->
             Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 6.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(cardDark)
-                    .clickable { onCategory(category) }
-                    .padding(16.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp).clip(RoundedCornerShape(16.dp)).background(cardDark).clickable { onCategory(category) }.padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    Modifier
-                        .size(38.dp)
-                        .clip(CircleShape)
-                        .background(accentRed.copy(alpha = 0.18f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("▶", color = accentRed, fontSize = 13.sp)
-                }
+                Box(Modifier.size(38.dp).clip(CircleShape).background(accentRed.copy(alpha = 0.18f)), contentAlignment = Alignment.Center) { Text("▶", color = accentRed, fontSize = 13.sp) }
                 Spacer(Modifier.width(14.dp))
-                Text(
-                    category.name,
-                    color = primaryText,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f)
-                )
+                Text(category.name, color = primaryText, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Text("›", color = textMuted, fontSize = 22.sp)
             }
         }
@@ -1171,56 +981,20 @@ private fun TrendingOrSavedScreen(
     emptyMessage: String = "লোড হচ্ছে...",
     onOpen: (Recommendation) -> Unit
 ) {
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(bottom = 100.dp)
-    ) {
-        Text(
-            screenTitle,
-            Modifier.padding(start = 20.dp, top = 24.dp, bottom = 16.dp),
-            color = primaryText,
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Black
-        )
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 100.dp)) {
+        Text(screenTitle, Modifier.padding(start = 20.dp, top = 24.dp, bottom = 16.dp), color = primaryText, fontSize = 24.sp, fontWeight = FontWeight.Black)
         if (items.isEmpty()) {
             Text(emptyMessage, Modifier.padding(20.dp), color = textMuted, fontSize = 13.sp)
         } else {
             items.chunked(2).forEach { pair ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 18.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     pair.forEach { item ->
-                        Column(
-                            Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(cardDark)
-                                .clickable { onOpen(item) }
-                        ) {
-                            Box(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .height(175.dp)
-                                    .background(if (appDarkMode) Color(0xFF25252D) else Color(0xFFE4EAF4)),
-                                contentAlignment = Alignment.Center
-                            ) {
+                        Column(Modifier.weight(1f).clip(RoundedCornerShape(16.dp)).background(cardDark).clickable { onOpen(item) }) {
+                            Box(Modifier.fillMaxWidth().height(175.dp).background(if (appDarkMode) Color(0xFF25252D) else Color(0xFFE4EAF4)), contentAlignment = Alignment.Center) {
                                 if (item.poster != null) NetworkPoster(item.poster, Modifier.fillMaxSize())
                                 else Text("BEEGEAR", color = accentRed, fontWeight = FontWeight.Black)
                             }
-                            Text(
-                                item.title,
-                                Modifier.padding(10.dp),
-                                color = primaryText,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Text(item.title, Modifier.padding(10.dp), color = primaryText, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
                     }
                     if (pair.size == 1) Spacer(Modifier.weight(1f))
@@ -1236,13 +1010,7 @@ private fun TrendingOrSavedScreen(
    ============================================================================ */
 @Composable
 private fun FloatingBottomNav(tab: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
-    val navItems = listOf(
-        "HOME" to "clapperboard",
-        "SEARCH" to "radar",
-        "BROWSE" to "orbit",
-        "TRENDING" to "flame",
-        "FAVORITES" to "layers-3"
-    )
+    val navItems = listOf("HOME" to "clapperboard", "SEARCH" to "radar", "BROWSE" to "orbit", "TRENDING" to "flame", "FAVORITES" to "layers-3")
     val selectedIndex = navItems.indexOfFirst { it.first == tab }.coerceAtLeast(0)
     val iconColor = if (appDarkMode) Color.White else Color(0xFF171717)
     BoxWithConstraints(
@@ -1258,18 +1026,14 @@ private fun FloatingBottomNav(tab: String, onSelect: (String) -> Unit, modifier:
             label = "liquidGlassPosition"
         )
         Box(
-            Modifier.offset(x = indicatorX, y = 5.dp).width(pillWidth).height(66.dp)
-                .clip(RoundedCornerShape(36.dp))
+            Modifier.offset(x = indicatorX, y = 5.dp).width(pillWidth).height(66.dp).clip(RoundedCornerShape(36.dp))
                 .background(Brush.linearGradient(if (appDarkMode) listOf(Color.White.copy(.27f), Color.White.copy(.10f), Color(0xFF9CB9E8).copy(.16f)) else listOf(Color.White.copy(.94f), Color.White.copy(.56f), Color(0xFFD9E8F8).copy(.48f))))
                 .border(1.dp, Color.White.copy(alpha = .78f), RoundedCornerShape(36.dp))
         )
         Row(Modifier.fillMaxSize().padding(horizontal = 3.dp), verticalAlignment = Alignment.CenterVertically) {
             navItems.forEachIndexed { index, item ->
                 val selected = index == selectedIndex
-                Box(
-                    Modifier.weight(1f).fillMaxHeight().clickable { onSelect(item.first) },
-                    contentAlignment = Alignment.Center
-                ) {
+                Box(Modifier.weight(1f).fillMaxHeight().clickable { onSelect(item.first) }, contentAlignment = Alignment.Center) {
                     androidx.compose.material3.Icon(
                         imageVector = when (item.second) {
                             "clapperboard" -> Icons.Filled.Movie
@@ -1296,13 +1060,8 @@ private fun NetworkPoster(url: String, modifier: Modifier = Modifier) {
     val bitmap by produceState<Bitmap?>(null, url) {
         value = withContext(Dispatchers.IO) {
             try {
-                URL(url).openConnection().apply {
-                    connectTimeout = 10000
-                    readTimeout = 15000
-                }.getInputStream().use { BitmapFactory.decodeStream(it) }
-            } catch (_: Exception) {
-                null
-            }
+                URL(url).openConnection().apply { connectTimeout = 10000; readTimeout = 15000 }.getInputStream().use { BitmapFactory.decodeStream(it) }
+            } catch (_: Exception) { null }
         }
     }
     if (bitmap != null) {
@@ -1314,9 +1073,6 @@ private fun NetworkPoster(url: String, modifier: Modifier = Modifier) {
     }
 }
 
-// ============================================================
-// FIX 2: Gesture overlay — volume & brightness indicator
-// ============================================================
 @Composable
 private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
     val context = LocalContext.current
@@ -1327,8 +1083,6 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
     var externalSubtitleName by remember { mutableStateOf("") }
     var autoSubtitleCount by remember { mutableIntStateOf(0) }
     var autoSubtitleConfigs by remember { mutableStateOf(emptyList<MediaItem.SubtitleConfiguration>()) }
-
-    // Gesture overlay state: type ("VOLUME" | "BRIGHTNESS") + value (0f..1f)
     var gestureOverlay by remember { mutableStateOf<Pair<String, Float>?>(null) }
     val overlayScope = rememberCoroutineScope()
 
@@ -1346,7 +1100,6 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
         detectDragGestures(
             onDragStart = { accumulatedY = 0f },
             onDragEnd = {
-                // ১.২ সেকেন্ড পরে overlay মিলিয়ে যাবে
                 overlayScope.launch {
                     kotlinx.coroutines.delay(1200)
                     gestureOverlay = null
@@ -1359,7 +1112,6 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
                     val increase = accumulatedY < 0f
                     val isLeftHalf = change.position.x < size.width / 2f
                     if (isLeftHalf) {
-                        // বাম দিকে drag = Brightness
                         val activity = context as? Activity
                         val window = activity?.window
                         if (window != null) {
@@ -1371,7 +1123,6 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
                             gestureOverlay = "BRIGHTNESS" to newBrightness
                         }
                     } else {
-                        // ডান দিকে drag = Volume
                         val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
                         val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
                         val newVolume = (currentVolume + if (increase) 1 else -1).coerceIn(0, maxVolume)
@@ -1389,10 +1140,7 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
         if (subtitles.isNotEmpty()) {
             val position = player.currentPosition
             val wasPlaying = player.playWhenReady
-            val item = MediaItem.Builder()
-                .setUri(Uri.parse(url))
-                .setSubtitleConfigurations(subtitles)
-                .build()
+            val item = MediaItem.Builder().setUri(Uri.parse(url)).setSubtitleConfigurations(subtitles).build()
             player.setMediaItem(item, position)
             player.prepare()
             player.playWhenReady = wasPlaying
@@ -1403,15 +1151,9 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
 
     DisposableEffect(player) { onDispose { player.release() } }
 
-    val externalSubtitlePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
+    val externalSubtitlePicker = rememberLauncherForActivityResult(contract = ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            } catch (_: Exception) { }
+            try { context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) { }
             val mime = subtitleMimeType(uri.lastPathSegment ?: uri.toString())
                 ?: when (context.contentResolver.getType(uri)) {
                     "text/vtt" -> MimeTypes.TEXT_VTT
@@ -1423,20 +1165,8 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
             } else {
                 val position = player.currentPosition
                 val wasPlaying = player.playWhenReady
-                val currentItem = MediaItem.Builder()
-                    .setUri(Uri.parse(url))
-                    .setSubtitleConfigurations(
-                        buildList {
-                            addAll(autoSubtitleConfigs)
-                            add(
-                                MediaItem.SubtitleConfiguration.Builder(uri)
-                                    .setMimeType(mime)
-                                    .setLanguage("und")
-                                    .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                                    .build()
-                            )
-                        }
-                    )
+                val currentItem = MediaItem.Builder().setUri(Uri.parse(url))
+                    .setSubtitleConfigurations(buildList { addAll(autoSubtitleConfigs); add(MediaItem.SubtitleConfiguration.Builder(uri).setMimeType(mime).setLanguage("und").setSelectionFlags(C.SELECTION_FLAG_DEFAULT).build()) })
                     .build()
                 player.setMediaItem(currentItem, position)
                 player.prepare()
@@ -1454,9 +1184,7 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
                 for (index in 0 until group.length) {
                     if (group.isTrackSupported(index)) {
                         val format = group.getTrackFormat(index)
-                        val label = format.label
-                            ?: format.language
-                            ?: "Subtitle ${tracks.size + 1}"
+                        val label = format.label ?: format.language ?: "Subtitle ${tracks.size + 1}"
                         tracks.add(label to (group.mediaTrackGroup to index))
                     }
                 }
@@ -1466,10 +1194,7 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
     }
 
     LaunchedEffect(player) {
-        while (true) {
-            refreshSubtitleTracks()
-            kotlinx.coroutines.delay(700)
-        }
+        while (true) { refreshSubtitleTracks(); kotlinx.coroutines.delay(700) }
     }
 
     DisposableEffect(fullscreen) {
@@ -1478,16 +1203,8 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
         val decor = window?.decorView
         val oldSystemUi = decor?.systemUiVisibility ?: 0
         val oldOrientation = activity?.requestedOrientation
-
         if (fullscreen) {
-            decor?.systemUiVisibility = (
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-                    View.SYSTEM_UI_FLAG_FULLSCREEN or
-                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
-                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                )
+            decor?.systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         } else {
             decor?.systemUiVisibility = oldSystemUi
@@ -1502,172 +1219,64 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (!fullscreen) {
             Column(Modifier.fillMaxSize()) {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("‹", color = Color.White, fontSize = 30.sp, modifier = Modifier.clickable { onBack() })
                     Spacer(Modifier.width(12.dp))
-                    Text(
-                        title,
-                        color = Color.White,
-                        fontSize = 14.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Text(
-                        "CC",
-                        color = Color.White,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Color.White.copy(alpha = 0.14f))
-                            .clickable { refreshSubtitleTracks(); subtitleDialog = true }
-                            .padding(horizontal = 13.dp, vertical = 9.dp)
-                    )
+                    Text(title, color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    Text("CC", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(Color.White.copy(alpha = 0.14f)).clickable { refreshSubtitleTracks(); subtitleDialog = true }.padding(horizontal = 13.dp, vertical = 9.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text(
-                        "⛶",
-                        color = Color.White,
-                        fontSize = 24.sp,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Color.White.copy(alpha = 0.14f))
-                            .clickable { fullscreen = true }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                    )
+                    Text("⛶", color = Color.White, fontSize = 24.sp,
+                        modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(Color.White.copy(alpha = 0.14f)).clickable { fullscreen = true }.padding(horizontal = 10.dp, vertical = 5.dp))
                 }
                 AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            this.player = player
-                            useController = true
-                            keepScreenOn = true
-                        }
-                    },
+                    factory = { ctx -> PlayerView(ctx).apply { this.player = player; useController = true; keepScreenOn = true } },
                     update = { it.player = player },
                     modifier = Modifier.weight(1f).fillMaxWidth().then(gestureModifier)
                 )
             }
         } else {
             AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        this.player = player
-                        useController = true
-                        keepScreenOn = true
-                    }
-                },
+                factory = { ctx -> PlayerView(ctx).apply { this.player = player; useController = true; keepScreenOn = true } },
                 update = { it.player = player },
                 modifier = Modifier.fillMaxSize().then(gestureModifier)
             )
-            Row(
-                Modifier.align(Alignment.TopEnd).padding(14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    "CC",
-                    color = Color.White,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color.Black.copy(alpha = 0.55f))
-                        .clickable { refreshSubtitleTracks(); subtitleDialog = true }
-                        .padding(horizontal = 13.dp, vertical = 9.dp)
-                )
-                Text(
-                    "⛶",
-                    color = Color.White,
-                    fontSize = 24.sp,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color.Black.copy(alpha = 0.55f))
-                        .clickable { fullscreen = false }
-                        .padding(horizontal = 10.dp, vertical = 5.dp)
-                )
+            Row(Modifier.align(Alignment.TopEnd).padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("CC", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = 0.55f)).clickable { refreshSubtitleTracks(); subtitleDialog = true }.padding(horizontal = 13.dp, vertical = 9.dp))
+                Text("⛶", color = Color.White, fontSize = 24.sp,
+                    modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = 0.55f)).clickable { fullscreen = false }.padding(horizontal = 10.dp, vertical = 5.dp))
             }
-            Text(
-                "‹",
-                color = Color.White,
-                fontSize = 30.sp,
-                modifier = Modifier.align(Alignment.TopStart).padding(14.dp)
-                    .clickable { fullscreen = false; onBack() }
-            )
+            Text("‹", color = Color.White, fontSize = 30.sp, modifier = Modifier.align(Alignment.TopStart).padding(14.dp).clickable { fullscreen = false; onBack() })
         }
 
-        // ── Gesture Overlay (Volume / Brightness) ──────────────────────────
+        // Gesture Overlay (Volume / Brightness)
         gestureOverlay?.let { (type, value) ->
             val isVolume = type == "VOLUME"
             Box(
-                Modifier
-                    .align(if (isVolume) Alignment.CenterEnd else Alignment.CenterStart)
-                    .padding(horizontal = 24.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Color.Black.copy(alpha = 0.65f))
-                    .padding(horizontal = 18.dp, vertical = 14.dp),
+                Modifier.align(if (isVolume) Alignment.CenterEnd else Alignment.CenterStart)
+                    .padding(horizontal = 24.dp).clip(RoundedCornerShape(16.dp))
+                    .background(Color.Black.copy(alpha = 0.65f)).padding(horizontal = 18.dp, vertical = 14.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    // আইকন
                     Text(
-                        text = if (isVolume) {
-                            when {
-                                value <= 0f  -> "🔇"
-                                value < 0.4f -> "🔈"
-                                value < 0.75f -> "🔉"
-                                else         -> "🔊"
-                            }
-                        } else {
-                            when {
-                                value < 0.3f -> "🌑"
-                                value < 0.6f -> "🌤"
-                                else         -> "☀️"
-                            }
-                        },
+                        text = if (isVolume) { when { value <= 0f -> "🔇"; value < 0.4f -> "🔈"; value < 0.75f -> "🔉"; else -> "🔊" } }
+                        else { when { value < 0.3f -> "🌑"; value < 0.6f -> "🌤"; else -> "☀️" } },
                         fontSize = 22.sp
                     )
                     Spacer(Modifier.height(8.dp))
-                    // Vertical progress bar
-                    Box(
-                        Modifier
-                            .width(4.dp)
-                            .height(80.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Color.White.copy(alpha = 0.25f))
-                    ) {
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .fillMaxHeight(value)
-                                .align(Alignment.BottomCenter)
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(Color.White)
-                        )
+                    Box(Modifier.width(4.dp).height(80.dp).clip(RoundedCornerShape(4.dp)).background(Color.White.copy(alpha = 0.25f))) {
+                        Box(Modifier.fillMaxWidth().fillMaxHeight(value).align(Alignment.BottomCenter).clip(RoundedCornerShape(4.dp)).background(Color.White))
                     }
                     Spacer(Modifier.height(8.dp))
-                    // Percentage text
-                    Text(
-                        text = "${(value * 100).toInt()}%",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Text("${(value * 100).toInt()}%", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
-        // ───────────────────────────────────────────────────────────────────
 
         if (playerError.isNotBlank()) {
-            Text(
-                playerError,
-                color = Color(0xFFFF8A80),
-                fontSize = 12.sp,
-                modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp)
-            )
+            Text(playerError, color = Color(0xFFFF8A80), fontSize = 12.sp, modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp))
         }
     }
 
@@ -1679,52 +1288,26 @@ private fun VideoPlayerScreen(url: String, title: String, onBack: () -> Unit) {
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = {
-                        player.trackSelectionParameters =
-                            player.trackSelectionParameters.buildUpon()
-                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                                .build()
+                        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).clearOverridesOfType(C.TRACK_TYPE_TEXT).build()
                         subtitleDialog = false
-                    }) {
-                        Text("Off", color = Color.White)
-                    }
+                    }) { Text("Off", color = Color.White) }
                     if (embeddedSubtitleTracks.isEmpty()) {
-                        Text(
-                            "No embedded subtitle track detected.",
-                            color = Color.LightGray,
-                            fontSize = 13.sp
-                        )
+                        Text("No embedded subtitle track detected.", color = Color.LightGray, fontSize = 13.sp)
                     } else {
                         embeddedSubtitleTracks.forEach { (label, target) ->
                             TextButton(onClick = {
                                 val (mediaTrackGroup, trackIndex) = target
-                                player.trackSelectionParameters =
-                                    player.trackSelectionParameters.buildUpon()
-                                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                                        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                                        .addOverride(TrackSelectionOverride(mediaTrackGroup, listOf(trackIndex)))
-                                        .build()
+                                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).clearOverridesOfType(C.TRACK_TYPE_TEXT).addOverride(TrackSelectionOverride(mediaTrackGroup, listOf(trackIndex))).build()
                                 subtitleDialog = false
-                            }) {
-                                Text(label, color = Color.White)
-                            }
+                            }) { Text(label, color = Color.White) }
                         }
                     }
-                    TextButton(onClick = {
-                        subtitleDialog = false
-                        externalSubtitlePicker.launch(
-                            arrayOf("application/x-subrip", "text/vtt", "text/*", "*/*")
-                        )
-                    }) {
+                    TextButton(onClick = { subtitleDialog = false; externalSubtitlePicker.launch(arrayOf("application/x-subrip", "text/vtt", "text/*", "*/*")) }) {
                         Text("＋ Open external subtitle", color = Color(0xFFFF6B75))
                     }
                 }
             },
-            confirmButton = {
-                TextButton(onClick = { subtitleDialog = false }) {
-                    Text("Close", color = Color.White)
-                }
-            }
+            confirmButton = { TextButton(onClick = { subtitleDialog = false }) { Text("Close", color = Color.White) } }
         )
     }
 }
