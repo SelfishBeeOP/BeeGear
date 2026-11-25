@@ -136,7 +136,7 @@ data class Recommendation(val title: String, val url: String, val poster: String
 data class SearchHit(val title: String, val url: String, val poster: String?, val subtitle: String, val isVideo: Boolean)
 
 /* ============================================================================
-   THEME & BACKGROUND COLOR PALETTES (GLASS UI PRESERVED + MATCHING FONT COLORS)
+   THEME & BACKGROUND COLOR PALETTES (GLASS UI + RICHER DARK EMERALD)
    ============================================================================ */
 private data class BgPalette(
     val id: String,
@@ -201,11 +201,11 @@ private val bgPalettes = listOf(
         lightPrimaryText = Color(0xFF1B4538),
         lightMutedText = Color(0xFF5D8074),
         lightAccent = Color(0xFF268F6E),
-        darkBg = Color(0xFF0E1714),
-        darkCard = Color(0xFF1B2B26),
-        darkTag = Color(0xFF263C35),
+        darkBg = Color(0xFF0B241C),
+        darkCard = Color(0xD915382C),
+        darkTag = Color(0xE01F4D3D),
         darkPrimaryText = Color(0xFFEFFAF6),
-        darkMutedText = Color(0xFFA2C2B7),
+        darkMutedText = Color(0xFFA7C9BD),
         darkAccent = Color(0xFF47C49C)
     ),
     BgPalette(
@@ -265,6 +265,22 @@ private val primaryText: Color
 private val accentRed: Color
     get() = if (appDarkMode) currentPalette.darkAccent else currentPalette.lightAccent
 private val starGold = Color(0xFFE0A83A)
+
+private fun Modifier.appSurfaceBackground(): Modifier {
+    return if (appDarkMode && selectedPaletteId == "emerald_mint") {
+        this.background(
+            Brush.verticalGradient(
+                listOf(
+                    Color(0xFF0A261D),
+                    Color(0xF00E3126),
+                    Color(0xFF092018)
+                )
+            )
+        )
+    } else {
+        this.background(bgDark)
+    }
+}
 
 /* ============================================================================
    SINGLE-ACTIVE DOWNLOAD QUEUE MANAGER (AUTO-RESUME ON ABORT + MOVIES/BeeGear)
@@ -900,7 +916,7 @@ private fun yearPriorityBoost(name: String): Long {
     return (years - 1990).toLong() * 86_400_000L * 365L
 }
 
-private suspend fun scanFolder(url: String, timeoutMs: Int = 12000): Result<List<MediaEntry>> = withContext(Dispatchers.IO) {
+private suspend fun scanFolder(url: String, timeoutMs: Int = 14000): Result<List<MediaEntry>> = withContext(Dispatchers.IO) {
     try {
         val doc = Jsoup.connect(url).userAgent("Mozilla/5.0").timeout(timeoutMs).ignoreContentType(true).get()
         val host = URL(url).host
@@ -947,17 +963,17 @@ private suspend fun scanFolder(url: String, timeoutMs: Int = 12000): Result<List
 }
 
 private suspend fun findPosterDeep(folderUrl: String): String? = withContext(Dispatchers.IO) {
-    val level1 = scanFolder(folderUrl, 8000).getOrNull().orEmpty()
+    val level1 = scanFolder(folderUrl, 9000).getOrNull().orEmpty()
     val poster1 = level1.firstOrNull { it.isImage }?.url
     if (poster1 != null) return@withContext poster1
 
     val subFolder1 = level1.firstOrNull { it.isFolder } ?: return@withContext null
-    val level2 = scanFolder(subFolder1.url, 8000).getOrNull().orEmpty()
+    val level2 = scanFolder(subFolder1.url, 9000).getOrNull().orEmpty()
     val poster2 = level2.firstOrNull { it.isImage }?.url
     if (poster2 != null) return@withContext poster2
 
     val subFolder2 = level2.firstOrNull { it.isFolder } ?: return@withContext null
-    val level3 = scanFolder(subFolder2.url, 8000).getOrNull().orEmpty()
+    val level3 = scanFolder(subFolder2.url, 9000).getOrNull().orEmpty()
     level3.firstOrNull { it.isImage }?.url
 }
 
@@ -969,89 +985,116 @@ private fun latestFreshnessScore(entry: MediaEntry, nestedMaxModified: Long = 0L
 }
 
 /* ============================================================================
-   RECOMMENDATIONS LOADER (DEEP SUBFOLDER / SEASON SUPPORT FOR SERIES & ANIME)
+   RECOMMENDATIONS LOADER (DEEP YEAR / ALPHA / SEASON SUBFOLDER SUPPORT + RETRY)
    ============================================================================ */
+private suspend fun scanCategoryRecommendations(category: Category): List<Recommendation> = withContext(Dispatchers.IO) {
+    val results = mutableListOf<Recommendation>()
+    val seenUrls = HashSet<String>()
+    val topLevel = scanFolder(category.url, 15000).getOrNull().orEmpty()
+
+    val prioritizedFolders = topLevel.filter { it.isFolder }
+        .sortedWith(
+            compareByDescending<MediaEntry> {
+                val clean = it.name.trim()
+                clean.matches(Regex("^(19\\d{2}|20\\d{2}).*"))
+            }.thenByDescending { latestFreshnessScore(it) }
+        )
+        .take(16)
+
+    for (folder in prioritizedFolders) {
+        if (results.size >= 12) break
+        val inside = scanFolder(folder.url, 14000).getOrNull().orEmpty()
+        val directVideos = inside.any { it.isVideo }
+        val directPoster = inside.firstOrNull { it.isImage }?.url
+        val maxInsideDate = inside.maxOfOrNull { it.lastModifiedMs } ?: 0L
+
+        if (directVideos) {
+            if (seenUrls.add(folder.url)) {
+                results.add(
+                    Recommendation(
+                        title = folder.name,
+                        url = folder.url,
+                        poster = directPoster,
+                        subtitle = category.name,
+                        score = latestFreshnessScore(folder, maxInsideDate)
+                    )
+                )
+            }
+            continue
+        }
+
+        val nestedFolders = inside.filter { it.isFolder }
+            .sortedByDescending { latestFreshnessScore(it) }
+            .take(14)
+
+        for (child in nestedFolders) {
+            if (results.size >= 12) break
+            val childItems = scanFolder(child.url, 13000).getOrNull().orEmpty()
+            val childPoster = childItems.firstOrNull { it.isImage }?.url ?: directPoster
+            val childMaxDate = maxOf(maxInsideDate, childItems.maxOfOrNull { it.lastModifiedMs } ?: 0L)
+
+            if (childItems.any { it.isVideo }) {
+                if (seenUrls.add(child.url)) {
+                    results.add(
+                        Recommendation(
+                            title = child.name,
+                            url = child.url,
+                            poster = childPoster,
+                            subtitle = category.name,
+                            score = latestFreshnessScore(child, childMaxDate)
+                        )
+                    )
+                }
+                continue
+            }
+
+            val deeperFolders = childItems.filter { it.isFolder }
+                .sortedByDescending { latestFreshnessScore(it) }
+                .take(8)
+
+            for (deep in deeperFolders) {
+                if (results.size >= 12) break
+                val deepItems = scanFolder(deep.url, 12000).getOrNull().orEmpty()
+                val deepPoster = deepItems.firstOrNull { it.isImage }?.url ?: childPoster
+                val deepMaxDate = maxOf(childMaxDate, deepItems.maxOfOrNull { it.lastModifiedMs } ?: 0L)
+
+                if (deepItems.any { it.isVideo }) {
+                    val isSeasonNode = deep.name.contains("season", ignoreCase = true) ||
+                        deep.name.matches(Regex("^(s\\d+|part\\s*\\d+).*", RegexOption.IGNORE_CASE))
+                    val targetUrl = if (isSeasonNode) child.url else deep.url
+                    val targetTitle = if (isSeasonNode) child.name else deep.name
+                    if (seenUrls.add(targetUrl)) {
+                        results.add(
+                            Recommendation(
+                                title = targetTitle,
+                                url = targetUrl,
+                                poster = deepPoster,
+                                subtitle = category.name,
+                                score = latestFreshnessScore(deep, deepMaxDate)
+                            )
+                        )
+                    }
+                    if (isSeasonNode) break
+                }
+            }
+        }
+    }
+
+    results
+}
+
 private suspend fun loadRecommendations(): List<Recommendation> = withContext(Dispatchers.IO) {
     val collected = Collections.synchronizedList(mutableListOf<Recommendation>())
-    val seenUrls = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
     coroutineScope {
         val jobs = categories.map { category ->
             async(Dispatchers.IO) {
-                val topLevel = scanFolder(category.url, 12000).getOrNull().orEmpty()
-                val folders = topLevel.filter { it.isFolder }
-                    .sortedByDescending { latestFreshnessScore(it) }
-                    .take(10)
-
-                for (folder in folders) {
-                    val inside = scanFolder(folder.url, 12000).getOrNull().orEmpty()
-                    val directVideos = inside.any { it.isVideo }
-                    val directPoster = inside.firstOrNull { it.isImage }?.url
-                    val maxInsideDate = inside.maxOfOrNull { it.lastModifiedMs } ?: 0L
-
-                    if (directVideos) {
-                        if (seenUrls.add(folder.url)) {
-                            collected.add(
-                                Recommendation(
-                                    title = folder.name,
-                                    url = folder.url,
-                                    poster = directPoster,
-                                    subtitle = category.name,
-                                    score = latestFreshnessScore(folder, maxInsideDate)
-                                )
-                            )
-                        }
-                        continue
-                    }
-
-                    val nestedFolders = inside.filter { it.isFolder }
-                        .sortedByDescending { latestFreshnessScore(it) }
-                        .take(8)
-
-                    for (child in nestedFolders) {
-                        val childItems = scanFolder(child.url, 12000).getOrNull().orEmpty()
-                        val childPoster = childItems.firstOrNull { it.isImage }?.url ?: directPoster
-                        val childMaxDate = maxOf(maxInsideDate, childItems.maxOfOrNull { it.lastModifiedMs } ?: 0L)
-
-                        if (childItems.any { it.isVideo }) {
-                            if (seenUrls.add(child.url)) {
-                                collected.add(
-                                    Recommendation(
-                                        title = child.name,
-                                        url = child.url,
-                                        poster = childPoster,
-                                        subtitle = category.name,
-                                        score = latestFreshnessScore(child, childMaxDate)
-                                    )
-                                )
-                            }
-                            continue
-                        }
-
-                        val seasonFolders = childItems.filter { it.isFolder }
-                            .sortedByDescending { latestFreshnessScore(it) }
-                            .take(5)
-
-                        for (season in seasonFolders) {
-                            val seasonItems = scanFolder(season.url, 12000).getOrNull().orEmpty()
-                            if (seasonItems.any { it.isVideo }) {
-                                val seasonMaxDate = maxOf(childMaxDate, seasonItems.maxOfOrNull { it.lastModifiedMs } ?: 0L)
-                                if (seenUrls.add(child.url)) {
-                                    collected.add(
-                                        Recommendation(
-                                            title = child.name,
-                                            url = child.url,
-                                            poster = seasonItems.firstOrNull { it.isImage }?.url ?: childPoster,
-                                            subtitle = category.name,
-                                            score = latestFreshnessScore(child, seasonMaxDate)
-                                        )
-                                    )
-                                }
-                                break
-                            }
-                        }
-                    }
+                var items = scanCategoryRecommendations(category)
+                if (items.isEmpty()) {
+                    delay(450)
+                    items = scanCategoryRecommendations(category)
                 }
+                collected.addAll(items)
             }
         }
         jobs.awaitAll()
@@ -1059,7 +1102,7 @@ private suspend fun loadRecommendations(): List<Recommendation> = withContext(Di
 
     collected.distinctBy { it.url }
         .sortedByDescending { it.score }
-        .take(50)
+        .take(90)
 }
 
 private fun normalizeSearchText(input: String): String {
@@ -1265,6 +1308,18 @@ fun BeeGearApp() {
             .edit().putString("saved_items", array.toString()).apply()
     }
 
+    fun goHomeDirectly() {
+        playingUrl = null
+        playingTitle = ""
+        showSettings = false
+        showDownloads = false
+        stack = emptyList()
+        currentUrl = ""
+        currentTitle = ""
+        currentPoster = null
+        tab = "HOME"
+    }
+
     fun openFolder(title: String, url: String, poster: String? = null) {
         showSettings = false
         showDownloads = false
@@ -1348,7 +1403,7 @@ fun BeeGearApp() {
         Modifier
             .fillMaxSize()
             .then(if (playingUrl == null) Modifier.statusBarsPadding().navigationBarsPadding() else Modifier)
-            .background(bgDark)
+            .appSurfaceBackground()
     ) {
         when {
             playingUrl != null -> VideoPlayerScreen(playingUrl!!, playingTitle) { playingUrl = null }
@@ -1375,6 +1430,7 @@ fun BeeGearApp() {
                     }
                 },
                 onBack = { back() },
+                onGoHome = { goHomeDirectly() },
                 onOpenDownloads = { showDownloads = true },
                 onFolder = { openFolder(it.name, it.url) },
                 onVideo = { video ->
@@ -1467,7 +1523,7 @@ private fun SettingsScreen(
     Column(
         Modifier
             .fillMaxSize()
-            .background(bgDark)
+            .appSurfaceBackground()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 18.dp, vertical = 16.dp)
     ) {
@@ -1677,7 +1733,7 @@ private fun DownloadQueueScreen(onBack: () -> Unit) {
     Column(
         Modifier
             .fillMaxSize()
-            .background(bgDark)
+            .appSurfaceBackground()
             .padding(horizontal = 18.dp, vertical = 16.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1882,7 +1938,7 @@ private fun HomeScreen(
     Column(
         Modifier
             .fillMaxSize()
-            .background(bgDark)
+            .appSurfaceBackground()
             .verticalScroll(pageState)
             .padding(bottom = 112.dp)
     ) {
@@ -2241,7 +2297,7 @@ private fun GlassCategorySection(
 }
 
 /* ============================================================================
-   2. DETAILS & FOLDER SCREEN (WITH IN-FOLDER TITLE SEARCH)
+   2. DETAILS & FOLDER SCREEN (IN-FOLDER SEARCH + BeeGear HOME BUTTON)
    ============================================================================ */
 @Composable
 private fun MediaDetailsScreen(
@@ -2253,6 +2309,7 @@ private fun MediaDetailsScreen(
     isFavorite: Boolean,
     onToggleFavorite: () -> Unit,
     onBack: () -> Unit,
+    onGoHome: () -> Unit,
     onOpenDownloads: () -> Unit,
     onFolder: (MediaEntry) -> Unit,
     onVideo: (MediaEntry) -> Unit,
@@ -2272,7 +2329,7 @@ private fun MediaDetailsScreen(
     val folderRows = remember(filteredFolders) { filteredFolders.chunked(2) }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize().background(bgDark),
+        modifier = Modifier.fillMaxSize().appSurfaceBackground(),
         contentPadding = PaddingValues(bottom = 36.dp)
     ) {
         item {
@@ -2291,15 +2348,34 @@ private fun MediaDetailsScreen(
                         Modifier
                             .size(36.dp)
                             .clip(CircleShape)
-                            .background(Color.Black.copy(alpha = 0.5f))
+                            .background(Color.Black.copy(alpha = 0.55f))
                             .clickable { onBack() },
                         contentAlignment = Alignment.Center
                     ) {
                         Text("‹", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                     }
                     Spacer(Modifier.weight(1f))
-                    Box(Modifier.size(28.dp).clip(RoundedCornerShape(7.dp)).background(accentRed), contentAlignment = Alignment.Center) {
-                        Text("B", color = Color.White, fontWeight = FontWeight.Black, fontSize = 16.sp)
+                    Row(
+                        Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xD912110F))
+                            .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(10.dp))
+                            .clickable { onGoHome() }
+                            .padding(horizontal = 12.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Bee",
+                            color = Color(0xFFF6F3EE),
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 15.sp
+                        )
+                        Text(
+                            "Gear",
+                            color = Color(0xFFD99B48),
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 15.sp
+                        )
                     }
                     Spacer(Modifier.weight(1f))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2307,7 +2383,7 @@ private fun MediaDetailsScreen(
                             Modifier
                                 .size(36.dp)
                                 .clip(CircleShape)
-                                .background(if (folderSearchOpen) accentRed else Color.Black.copy(alpha = 0.5f))
+                                .background(if (folderSearchOpen) accentRed else Color.Black.copy(alpha = 0.55f))
                                 .clickable {
                                     folderSearchOpen = !folderSearchOpen
                                     if (!folderSearchOpen) folderTitleQuery = ""
@@ -2325,7 +2401,7 @@ private fun MediaDetailsScreen(
                             Modifier
                                 .size(36.dp)
                                 .clip(CircleShape)
-                                .background(Color.Black.copy(alpha = 0.5f))
+                                .background(Color.Black.copy(alpha = 0.55f))
                                 .clickable { onOpenDownloads() },
                             contentAlignment = Alignment.Center
                         ) {
@@ -2361,7 +2437,7 @@ private fun MediaDetailsScreen(
                     .fillMaxWidth()
                     .offset(y = (-24).dp)
                     .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
-                    .background(bgDark)
+                    .appSurfaceBackground()
                     .padding(horizontal = 22.dp, vertical = 16.dp)
             ) {
                 Text(
@@ -2646,7 +2722,7 @@ private fun SearchScreen(onOpenFolder: (SearchHit) -> Unit, onPlayVideo: (Search
     var error by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
 
-    Column(Modifier.fillMaxSize().background(bgDark).padding(horizontal = 18.dp).padding(bottom = 94.dp)) {
+    Column(Modifier.fillMaxSize().appSurfaceBackground().padding(horizontal = 18.dp).padding(bottom = 94.dp)) {
         Text("Search", color = primaryText, fontSize = 26.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(top = 22.dp, bottom = 14.dp))
         Row(
             Modifier
@@ -2740,7 +2816,7 @@ private fun BrowseScreen(
     onOpenSettings: () -> Unit,
     onOpenDownloads: () -> Unit
 ) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 100.dp)) {
+    Column(Modifier.fillMaxSize().appSurfaceBackground().verticalScroll(rememberScrollState()).padding(bottom = 100.dp)) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -2799,7 +2875,7 @@ private fun TrendingOrSavedScreen(
     emptyMessage: String = "লোড হচ্ছে...",
     onOpen: (Recommendation) -> Unit
 ) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 100.dp)) {
+    Column(Modifier.fillMaxSize().appSurfaceBackground().verticalScroll(rememberScrollState()).padding(bottom = 100.dp)) {
         Text(screenTitle, Modifier.padding(start = 20.dp, top = 24.dp, bottom = 16.dp), color = primaryText, fontSize = 24.sp, fontWeight = FontWeight.Black)
         if (items.isEmpty()) {
             Text(emptyMessage, Modifier.padding(20.dp), color = textMuted, fontSize = 13.sp)
